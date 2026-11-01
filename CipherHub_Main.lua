@@ -181,6 +181,8 @@ Config.HitChance = 100
 Config.Center = "กลางจอ"
 Config.Prediction = true
 Config.SilentDebug = true -- true = พิมพ์ข้อมูลการยิงแต่ละนัดใน Console (F9) เพื่อหาสาเหตุดาเมจไม่เข้า / ปิดได้โดยเปลี่ยนเป็น false
+Config.NoRecoil = false
+Config.NoSpread = false
 
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
@@ -279,13 +281,13 @@ end
 
 local silentDebugCount = 0
 local silentErrWarned = false
+local noSpreadCount = 0
 
--- แก้ทิศทางกระสุนให้พุ่งเข้าหาเป้า (แยกออกมาเพื่อครอบด้วย pcall ถ้าพังจะไม่ทำให้ปืนยิงไม่ออก)
-local function RedirectShot(args, handle)
-    local targetPart = GetTarget()
-    local chosenPlayer = CurrentTarget
-    if not (targetPart and chosenPlayer and targetPart.Parent and chosenPlayer.Character == targetPart.Parent) then return end
+-- ===== ตัวช่วยอ่านข้อมูลการยิง =====
+local Shot = {}
 
+-- หาตารางทิศทางกระสุน (ตารางที่มีแต่ Vector3) ในอาร์กิวเมนต์ของ SimulateProjectile
+function Shot.Slots(args)
     local slots = {}
     for _, i in ipairs({4, 6, 7}) do
         if type(args[i]) == "table" then
@@ -297,41 +299,44 @@ local function RedirectShot(args, handle)
             if valid and count > 0 then table.insert(slots, i) end
         end
     end
+    return slots
+end
 
+-- จุดที่กระสุนออกจากปากกระบอก
+function Shot.Origin(args, handle)
     local firePoint = args[5] and typeof(args[5]) == "Instance" and args[5]:FindFirstChild("GunFirePoint") or args[8]
     local origin = typeof(firePoint) == "Instance" and firePoint:IsA("Attachment") and firePoint.WorldPosition or nil
     if not origin and handle and handle:IsA("BasePart") then origin = handle.Position end
-    if not origin or #slots == 0 then return end
-    if Config.WallCheck and IsWallBlocked(origin, targetPart.Position, targetPart.Parent) then return end
+    return origin
+end
 
-    local physics = type(args[13]) == "table" and args[13] or {}
-    local aimPos = InterceptPoint(targetPart, origin, physics[1], physics[2])
-    local delta = aimPos - origin
-    if delta.Magnitude <= 0.01 then return end
-    local dir = delta.Unit
-
-    if Config.SilentDebug then
-        silentDebugCount += 1
-        pcall(function()
-            local cam = Workspace.CurrentCamera
-            local angle = cam and math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(dir), -1, 1))) or 0
-            local root = targetPart.Parent:FindFirstChild("HumanoidRootPart")
-            local moving = root and root.AssemblyLinearVelocity.Magnitude or 0
-            local wall = IsWallBlocked(origin, targetPart.Position, targetPart.Parent)
-            local ping = 0
-            pcall(function() ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
-            print(string.format("[SilentAim] #%d %s | ระยะ %.0f | เป้าวิ่ง %.0f stud/s | มุมจากกล้อง %.0f° | กำแพงขวาง: %s | ping %.0fms",
-                silentDebugCount, targetPart.Name, delta.Magnitude, moving, angle, wall and "มี" or "ไม่มี", ping))
-            if silentDebugCount <= 3 then
-                for _, i in ipairs(slots) do
-                    local n, first = 0, nil
-                    for _, v in pairs(args[i]) do n += 1; first = first or v end
-                    print(string.format("[SilentAim]   args[%d] = ตาราง Vector3 %d ตัว | ตัวแรกยาว %.2f", i, n, first and first.Magnitude or 0))
-                end
-            end
-        end)
+-- จุดที่ครอสแฮร์ชี้อยู่ (ยิงเรย์จากกล้อง ไม่นับตัวเราเอง)
+function Shot.Crosshair(origin)
+    Camera = Workspace.CurrentCamera or Camera
+    if not Camera then return nil end
+    local pos
+    if Config.Center == "เมาส์" and not UserInputService.TouchEnabled then
+        pos = UserInputService:GetMouseLocation()
+    else
+        pos = Camera.ViewportSize / 2
     end
+    local ray = Camera:ViewportPointToRay(pos.X, pos.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LocalPlayer.Character}
+    params.RespectCanCollide = true
+    local result = Workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
+    local point = result and result.Position or (ray.Origin + ray.Direction * 1000)
+    -- ถ้าจุดที่ได้อยู่ชิด/อยู่หลังปากกระบอก ให้ใช้จุดไกลบนเส้นเล็งแทน
+    local delta = point - origin
+    if delta.Magnitude < 1 or delta:Dot(ray.Direction) <= 0 then
+        point = ray.Origin + ray.Direction * 1000
+    end
+    return point
+end
 
+-- เขียนทิศทางใหม่ลงทุกตาราง โดยคงความยาว (ความเร็วกระสุน) เดิมไว้
+function Shot.Apply(args, slots, dir)
     for _, i in ipairs(slots) do
         local dirs = table.clone(args[i])
         for k, v in pairs(dirs) do
@@ -339,6 +344,273 @@ local function RedirectShot(args, handle)
         end
         args[i] = dirs
     end
+end
+
+-- แก้ทิศทางกระสุน (SilentAim / ไม่มีกระสุนกระจาย) แยกออกมาเพื่อครอบด้วย pcall
+-- ถ้าส่วนนี้พังจะไม่ทำให้ปืนยิงไม่ออก
+local function RedirectShot(args, handle)
+    local slots = Shot.Slots(args)
+    local origin = Shot.Origin(args, handle)
+    if not origin or #slots == 0 then return end
+
+    local redirected = false
+
+    -- 1) SilentAim: เล็งเข้าหาเป้าหมายใน FOV
+    if Config.SilentAim and math.random(1, 100) <= math.clamp(tonumber(Config.HitChance) or 100, 0, 100) then
+        local targetPart = GetTarget()
+        local chosenPlayer = CurrentTarget
+        if targetPart and chosenPlayer and targetPart.Parent and chosenPlayer.Character == targetPart.Parent
+            and not (Config.WallCheck and IsWallBlocked(origin, targetPart.Position, targetPart.Parent)) then
+            local physics = type(args[13]) == "table" and args[13] or {}
+            local aimPos = InterceptPoint(targetPart, origin, physics[1], physics[2])
+            local delta = aimPos - origin
+            if delta.Magnitude > 0.01 then
+                local dir = delta.Unit
+
+                if Config.SilentDebug then
+                    silentDebugCount += 1
+                    pcall(function()
+                        local cam = Workspace.CurrentCamera
+                        local angle = cam and math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(dir), -1, 1))) or 0
+                        local root = targetPart.Parent:FindFirstChild("HumanoidRootPart")
+                        local moving = root and root.AssemblyLinearVelocity.Magnitude or 0
+                        local wall = IsWallBlocked(origin, targetPart.Position, targetPart.Parent)
+                        local ping = 0
+                        pcall(function() ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
+                        print(string.format("[SilentAim] #%d %s | ระยะ %.0f | เป้าวิ่ง %.0f stud/s | มุมจากกล้อง %.0f° | กำแพงขวาง: %s | ping %.0fms",
+                            silentDebugCount, targetPart.Name, delta.Magnitude, moving, angle, wall and "มี" or "ไม่มี", ping))
+                        if silentDebugCount <= 3 then
+                            for _, i in ipairs(slots) do
+                                local n, first = 0, nil
+                                for _, v in pairs(args[i]) do n += 1; first = first or v end
+                                print(string.format("[SilentAim]   args[%d] = ตาราง Vector3 %d ตัว | ตัวแรกยาว %.2f", i, n, first and first.Magnitude or 0))
+                            end
+                        end
+                    end)
+                end
+
+                Shot.Apply(args, slots, dir)
+                redirected = true
+            end
+        end
+    end
+
+    -- 2) ไม่มีกระสุนกระจาย: ถ้า SilentAim ไม่ได้แก้ทิศ ให้ทุกเม็ดพุ่งตรงไปที่ครอสแฮร์
+    if not redirected and Config.NoSpread then
+        local point = Shot.Crosshair(origin)
+        if point then
+            local delta = point - origin
+            if delta.Magnitude > 1 then
+                Shot.Apply(args, slots, delta.Unit)
+                noSpreadCount += 1
+                if Config.SilentDebug and noSpreadCount <= 3 then
+                    local pellets = 0
+                    for _, i in ipairs(slots) do for _ in pairs(args[i]) do pellets += 1 end end
+                    print(string.format("[NoSpread] #%d ปรับทิศกระสุน %d เม็ด ให้ตรงครอสแฮร์", noSpreadCount, pellets))
+                end
+            end
+        end
+    end
+end
+
+-- ===== ลดแรงดีดปืน (No Recoil) =====
+-- วิธีทำงาน: หาค่าตัวเลขที่ชื่อมีคำว่า recoil ในข้อมูลปืน (Attribute / Value / ModuleScript ในปืน
+-- และตารางใน memory ถ้า executor มี getgc) แล้วตั้งเป็น 0 พร้อมจำค่าเดิมไว้คืนตอนปิด
+local Recoil = { saved = {}, scanned = setmetatable({}, {__mode = "k"}), token = 0, found = 0, names = {}, lastGC = 0 }
+local RECOIL_SKIP = { "recover", "reset", "return", "speed", "decay", "damp", "time", "delay", "cooldown", "enable", "use", "sound", "anim" }
+
+function Recoil.IsKey(key)
+    if type(key) ~= "string" then return false end
+    if not string.find(key, "[Rr][Ee][Cc][Oo][Ii][Ll]") then return false end
+    local k = string.lower(key)
+    for _, bad in ipairs(RECOIL_SKIP) do
+        if string.find(k, bad, 1, true) then return false end
+    end
+    return true
+end
+
+function Recoil.Zero(v)
+    local t = typeof(v)
+    if t == "number" then return 0 end
+    if t == "Vector3" then return Vector3.zero end
+    if t == "Vector2" then return Vector2.zero end
+    return nil
+end
+
+function Recoil.Note(name)
+    if #Recoil.names < 12 and not table.find(Recoil.names, name) then table.insert(Recoil.names, name) end
+end
+
+-- ตั้งค่าตัวเลข/เวกเตอร์ทุกตัวในตาราง (ชั้นเดียว) เป็น 0
+function Recoil.ZeroAll(tbl)
+    local n = 0
+    for k, v in next, tbl do
+        local z = Recoil.Zero(v)
+        if z ~= nil and v ~= z then
+            if pcall(rawset, tbl, k, z) then
+                table.insert(Recoil.saved, {tbl, k, v})
+                n += 1
+            end
+        end
+    end
+    return n
+end
+
+function Recoil.ZeroTable(tbl, depth, seen)
+    if seen[tbl] then return 0 end
+    seen[tbl] = true
+    local hits, subs
+    local ok = pcall(function()
+        for k, v in next, tbl do
+            if Recoil.IsKey(k) then
+                hits = hits or {}
+                hits[#hits + 1] = k
+            elseif depth > 0 and type(v) == "table" then
+                subs = subs or {}
+                subs[#subs + 1] = v
+            end
+        end
+    end)
+    if not ok then return 0 end
+    local n = 0
+    if hits then
+        for _, k in ipairs(hits) do
+            local v = rawget(tbl, k)
+            local z = Recoil.Zero(v)
+            if z ~= nil then
+                if v ~= z and pcall(rawset, tbl, k, z) then
+                    table.insert(Recoil.saved, {tbl, k, v})
+                    Recoil.Note(tostring(k))
+                    n += 1
+                end
+            elseif type(v) == "table" then
+                local c = Recoil.ZeroAll(v)
+                if c > 0 then Recoil.Note(tostring(k)) end
+                n += c
+            end
+        end
+    end
+    if subs then
+        for _, sub in ipairs(subs) do n += Recoil.ZeroTable(sub, depth - 1, seen) end
+    end
+    return n
+end
+
+function Recoil.ZeroInstance(inst)
+    local n = 0
+    pcall(function()
+        for name, val in pairs(inst:GetAttributes()) do
+            if Recoil.IsKey(name) then
+                local z = Recoil.Zero(val)
+                if z ~= nil and val ~= z then
+                    inst:SetAttribute(name, z)
+                    table.insert(Recoil.saved, {inst, name, val, "attr"})
+                    Recoil.Note(name)
+                    n += 1
+                end
+            end
+        end
+    end)
+    if inst:IsA("ValueBase") and Recoil.IsKey(inst.Name) then
+        pcall(function()
+            local val = inst.Value
+            local z = Recoil.Zero(val)
+            if z ~= nil and val ~= z then
+                inst.Value = z
+                table.insert(Recoil.saved, {inst, "Value", val, "value"})
+                Recoil.Note(inst.Name)
+                n += 1
+            end
+        end)
+    end
+    return n
+end
+
+function Recoil.Restore()
+    for i = #Recoil.saved, 1, -1 do
+        local e = Recoil.saved[i]
+        pcall(function()
+            if e[4] == "attr" then e[1]:SetAttribute(e[2], e[3])
+            elseif e[4] == "value" then e[1].Value = e[3]
+            else rawset(e[1], e[2], e[3]) end
+        end)
+    end
+    table.clear(Recoil.saved)
+    table.clear(Recoil.scanned)
+    Recoil.found = 0
+end
+
+function Recoil.ScanTool(tool)
+    local n = Recoil.ZeroInstance(tool)
+    for _, d in ipairs(tool:GetDescendants()) do
+        n += Recoil.ZeroInstance(d)
+        if d:IsA("ModuleScript") then
+            local ok, mod = pcall(require, d)
+            if ok and type(mod) == "table" then n += Recoil.ZeroTable(mod, 3, {}) end
+        end
+    end
+    return n
+end
+
+function Recoil.ScanGC()
+    if typeof(getgc) ~= "function" then return 0 end
+    local ok, gc = pcall(getgc, true)
+    if not ok or type(gc) ~= "table" then return 0 end
+    local n, seen = 0, {}
+    for i, obj in ipairs(gc) do
+        if type(obj) == "table" then n += Recoil.ZeroTable(obj, 0, seen) end
+        if i % 3000 == 0 then
+            task.wait()
+            if not Config.NoRecoil then break end
+        end
+    end
+    return n
+end
+
+function Recoil.Start()
+    Recoil.token += 1
+    local token = Recoil.token
+    task.spawn(function()
+        local firstRun = true
+        while Config.NoRecoil and Recoil.token == token do
+            local newTool = false
+            local function scan(tool)
+                if tool:IsA("Tool") and not Recoil.scanned[tool] then
+                    Recoil.scanned[tool] = true
+                    newTool = true
+                    table.clear(Recoil.names)
+                    local n = Recoil.ScanTool(tool)
+                    Recoil.found += n
+                    if n > 0 then
+                        print(string.format("[Recoil] %s: ปรับค่า recoil %d รายการ (%s)", tool.Name, n, table.concat(Recoil.names, ", ")))
+                    else
+                        print(string.format("[Recoil] %s: ไม่พบค่า recoil ในตัวปืน (จะลองหาใน memory ต่อ)", tool.Name))
+                    end
+                end
+            end
+            local char = LocalPlayer.Character
+            if char then for _, c in ipairs(char:GetChildren()) do scan(c) end end
+            local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+            if bp then for _, c in ipairs(bp:GetChildren()) do scan(c) end end
+
+            if (firstRun or newTool) and os.clock() - Recoil.lastGC > 8 then
+                firstRun = false
+                Recoil.lastGC = os.clock()
+                task.wait(1)
+                if Config.NoRecoil and Recoil.token == token then
+                    table.clear(Recoil.names)
+                    local n = Recoil.ScanGC()
+                    Recoil.found += n
+                    if typeof(getgc) ~= "function" then
+                        print("[Recoil] executor นี้ไม่มี getgc จึงหาค่า recoil ได้เฉพาะในตัวปืน")
+                    else
+                        print(string.format("[Recoil] memory: ปรับค่า recoil %d รายการ (%s)", n, table.concat(Recoil.names, ", ")))
+                    end
+                end
+            end
+            task.wait(2)
+        end
+    end)
 end
 
 local function HookProjectile()
@@ -369,7 +641,7 @@ local function HookProjectile()
             end
         end
         local localShot = tool and LocalPlayer.Character and tool:IsDescendantOf(LocalPlayer.Character) and args[15] ~= nil
-        if localShot and Config.SilentAim and math.random(1, 100) <= math.clamp(tonumber(Config.HitChance) or 100, 0, 100) then
+        if localShot and (Config.SilentAim or Config.NoSpread) then
             local okAim, errAim = pcall(RedirectShot, args, handle)
             if not okAim and not silentErrWarned then
                 silentErrWarned = true
@@ -3314,6 +3586,44 @@ Players.PlayerRemoving:Connect(function()
 end)
 end)
 
+-- ========== หมวดหมู่: การต่อสู้ (อยู่ใต้ Aim) ==========
+Safe("CombatTab", function()
+    local CombatTab = Win:Tab({
+        Title = "การต่อสู้",
+        Subtitle = "Combat",
+        Icon = Flexozy.Icons.Zap or Flexozy.Icons.Sword
+    })
+
+    local CombatGroup = CombatTab:Group("ฟังก์ชันต่อสู้", "Left")
+
+    Tg.NoRecoil = CombatGroup:Toggle(
+        "ลดแรงดีดปืน",
+        "ปิดแรงดีด/แรงสั่นของจอตอนยิง (ทดลอง: ได้ผลแค่ถ้าเกมเก็บค่า recoil ไว้ในข้อมูลปืน)",
+        false,
+        function(state)
+            Config.NoRecoil = state
+            if state then
+                Recoil.Start()
+            else
+                Recoil.token += 1
+                Recoil.Restore()
+            end
+        end,
+        "NoRecoil"
+    )
+
+    Tg.NoSpread = CombatGroup:Toggle(
+        "ไม่มีกระสุนกระจาย",
+        "กระสุนพุ่งตรงไปที่ครอสแฮร์ทุกนัด ลูกซองไม่กระจาย",
+        false,
+        function(state)
+            Config.NoSpread = state
+            if state then EnsureHook() end
+        end,
+        "NoSpread"
+    )
+end)
+
 local VisualTab = Win:Tab({
     Title = "ESP",
     Subtitle = "ESP & Overlay",
@@ -3656,6 +3966,16 @@ KeyGroupOpt:Button("รีเซ็ตคีย์ลัดทั้งหมด
 end)
 
 KeyGroupOpt:Label("คลิกช่องแล้วกดปุ่มที่ต้องการ | Esc = ยกเลิก | Backspace = ล้างปุ่ม")
+end)
+
+-- หมวด "หนีตำรวจ" สร้างตรงนี้เพื่อให้อยู่เหนือ Settings (ใส่ฟังก์ชันจริงทีหลังท้ายไฟล์)
+local PoliceTab
+Safe("PoliceTabCreate", function()
+    PoliceTab = Win:Tab({
+        Title = "หนีตำรวจ",
+        Subtitle = "Escape Police",
+        Icon = Flexozy.Icons.Skull
+    })
 end)
 
 local SettingsTab = Win:Tab({
@@ -4454,6 +4774,9 @@ getgenv().__CipherCleanup = function()
     pcall(function()
         Config.SilentAim = false
         Config.InfStamina = false
+        Config.NoRecoil = false
+        Config.NoSpread = false
+        pcall(function() Recoil.token += 1; Recoil.Restore() end)
         if getgenv().__SentorumSailueat and getgenv().__SentorumSailueat.Cleanup then
             getgenv().__SentorumSailueat.Cleanup()
         end
@@ -4709,7 +5032,7 @@ Players.PlayerRemoving:Connect(PoliceESP_Remove)
 -- ============================================================
 Safe("PoliceEscapeTab", function()
     -- สร้าง Tab ใหม่ชื่อ "หนีตำรวจ"
-    local PoliceTab = Win:Tab({
+    local PoliceTab = PoliceTab or Win:Tab({
         Title = "หนีตำรวจ",
         Subtitle = "Escape Police",
         Icon = Flexozy.Icons.Skull -- ใช้ไอคอนกะโหลกให้เข้ากับการหนีตำรวจ
