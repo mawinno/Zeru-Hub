@@ -180,6 +180,7 @@ end
 Config.HitChance = 100
 Config.Center = "กลางจอ"
 Config.Prediction = true
+Config.SilentDebug = true -- true = พิมพ์ข้อมูลการยิงแต่ละนัดใน Console (F9) เพื่อหาสาเหตุดาเมจไม่เข้า / ปิดได้โดยเปลี่ยนเป็น false
 
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
@@ -276,6 +277,70 @@ local function ResolveProjectileHandler()
     return nil
 end
 
+local silentDebugCount = 0
+local silentErrWarned = false
+
+-- แก้ทิศทางกระสุนให้พุ่งเข้าหาเป้า (แยกออกมาเพื่อครอบด้วย pcall ถ้าพังจะไม่ทำให้ปืนยิงไม่ออก)
+local function RedirectShot(args, handle)
+    local targetPart = GetTarget()
+    local chosenPlayer = CurrentTarget
+    if not (targetPart and chosenPlayer and targetPart.Parent and chosenPlayer.Character == targetPart.Parent) then return end
+
+    local slots = {}
+    for _, i in ipairs({4, 6, 7}) do
+        if type(args[i]) == "table" then
+            local valid, count = true, 0
+            for _, value in pairs(args[i]) do
+                if typeof(value) ~= "Vector3" then valid = false; break end
+                count += 1
+            end
+            if valid and count > 0 then table.insert(slots, i) end
+        end
+    end
+
+    local firePoint = args[5] and typeof(args[5]) == "Instance" and args[5]:FindFirstChild("GunFirePoint") or args[8]
+    local origin = typeof(firePoint) == "Instance" and firePoint:IsA("Attachment") and firePoint.WorldPosition or nil
+    if not origin and handle and handle:IsA("BasePart") then origin = handle.Position end
+    if not origin or #slots == 0 then return end
+    if Config.WallCheck and IsWallBlocked(origin, targetPart.Position, targetPart.Parent) then return end
+
+    local physics = type(args[13]) == "table" and args[13] or {}
+    local aimPos = InterceptPoint(targetPart, origin, physics[1], physics[2])
+    local delta = aimPos - origin
+    if delta.Magnitude <= 0.01 then return end
+    local dir = delta.Unit
+
+    if Config.SilentDebug then
+        silentDebugCount += 1
+        pcall(function()
+            local cam = Workspace.CurrentCamera
+            local angle = cam and math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(dir), -1, 1))) or 0
+            local root = targetPart.Parent:FindFirstChild("HumanoidRootPart")
+            local moving = root and root.AssemblyLinearVelocity.Magnitude or 0
+            local wall = IsWallBlocked(origin, targetPart.Position, targetPart.Parent)
+            local ping = 0
+            pcall(function() ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
+            print(string.format("[SilentAim] #%d %s | ระยะ %.0f | เป้าวิ่ง %.0f stud/s | มุมจากกล้อง %.0f° | กำแพงขวาง: %s | ping %.0fms",
+                silentDebugCount, targetPart.Name, delta.Magnitude, moving, angle, wall and "มี" or "ไม่มี", ping))
+            if silentDebugCount <= 3 then
+                for _, i in ipairs(slots) do
+                    local n, first = 0, nil
+                    for _, v in pairs(args[i]) do n += 1; first = first or v end
+                    print(string.format("[SilentAim]   args[%d] = ตาราง Vector3 %d ตัว | ตัวแรกยาว %.2f", i, n, first and first.Magnitude or 0))
+                end
+            end
+        end)
+    end
+
+    for _, i in ipairs(slots) do
+        local dirs = table.clone(args[i])
+        for k, v in pairs(dirs) do
+            if typeof(v) == "Vector3" then dirs[k] = dir * v.Magnitude end
+        end
+        args[i] = dirs
+    end
+end
+
 local function HookProjectile()
     local handler = ResolveProjectileHandler()
     if not handler then
@@ -305,36 +370,10 @@ local function HookProjectile()
         end
         local localShot = tool and LocalPlayer.Character and tool:IsDescendantOf(LocalPlayer.Character) and args[15] ~= nil
         if localShot and Config.SilentAim and math.random(1, 100) <= math.clamp(tonumber(Config.HitChance) or 100, 0, 100) then
-            local targetPart = GetTarget()
-            local chosenPlayer = CurrentTarget
-            if targetPart and chosenPlayer and chosenPlayer.Character == targetPart.Parent and targetPart.Parent then
-                local slots = {}
-                for _, i in ipairs({4, 6, 7}) do
-                    if type(args[i]) == "table" then
-                        local valid, count = true, 0
-                        for _, value in pairs(args[i]) do
-                            if typeof(value) ~= "Vector3" then valid = false; break end
-                            count += 1
-                        end
-                        if valid and count > 0 then table.insert(slots, i) end
-                    end
-                end
-                local firePoint = args[5] and typeof(args[5]) == "Instance" and args[5]:FindFirstChild("GunFirePoint") or args[8]
-                local origin = typeof(firePoint) == "Instance" and firePoint:IsA("Attachment") and firePoint.WorldPosition or nil
-                if not origin and handle and handle:IsA("BasePart") then origin = handle.Position end
-                if origin and #slots > 0 and (not Config.WallCheck or not IsWallBlocked(origin, targetPart.Position, targetPart.Parent)) then
-                    local physics = type(args[13]) == "table" and args[13] or {}
-                    local delta = InterceptPoint(targetPart, origin, physics[1], physics[2]) - origin
-                    if delta.Magnitude > 0.01 then
-                        for _, i in ipairs(slots) do
-                            local dirs = table.clone(args[i])
-                            for k, v in pairs(dirs) do
-                                if typeof(v) == "Vector3" then dirs[k] = delta.Unit * v.Magnitude end
-                            end
-                            args[i] = dirs
-                        end
-                    end
-                end
+            local okAim, errAim = pcall(RedirectShot, args, handle)
+            if not okAim and not silentErrWarned then
+                silentErrWarned = true
+                warn("[SilentAim] เกิดข้อผิดพลาด (ยิงต่อได้ตามปกติ): " .. tostring(errAim))
             end
         end
         if hookCallCount <= 3 then
