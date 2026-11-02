@@ -183,6 +183,13 @@ Config.Prediction = true
 Config.SilentDebug = true -- true = พิมพ์ข้อมูลการยิงแต่ละนัดใน Console (F9) เพื่อหาสาเหตุดาเมจไม่เข้า / ปิดได้โดยเปลี่ยนเป็น false
 Config.NoRecoil = false
 Config.NoSpread = false
+Config.FastReload = false
+Config.ReloadMult = 200 -- เปอร์เซ็นต์ (200 = เร็วขึ้น 2 เท่า)
+Config.FastEquip = false
+Config.AimWarn = false
+Config.AimWarnRange = 120
+Config.AimWarnScale = 100
+Config.AimWarnWall = true -- ไม่เตือนถ้ามีกำแพงบังระหว่างเรากับคนที่เล็ง
 
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
@@ -611,6 +618,317 @@ function Recoil.Start()
             task.wait(2)
         end
     end)
+end
+
+-- ===== รีโหลดไว / ชักปืนไว =====
+-- ปืนในเกมอ่านค่าเวลาจากโมดูล Setting ของปืนสดทุกครั้ง (ReloadTime, EquipTime ฯลฯ)
+-- เราลดค่าเวลาลงและเก็บค่าเดิมไว้คืนตอนปิด โดยมีเพดานขั้นต่ำกันเร็วเกินจริง
+local Tune = {
+    orig = setmetatable({}, {__mode = "k"}),
+    tools = setmetatable({}, {__mode = "k"}),
+    token = 0,
+    reloadTimes = { ReloadTime = 0.6, TacticalReloadTime = 0.6, PreShotgunReloadSpeed = 0.12, ShellClipinSpeed = 0.12 },
+    reloadAnims = { "ReloadAnimationSpeed", "VMReloadAnimationSpeed", "TacticalReloadAnimationSpeed", "VMTacticalReloadAnimationSpeed",
+        "PreShotgunReloadAnimationSpeed", "VMPreShotgunReloadAnimationSpeed", "ShotgunClipinAnimationSpeed", "VMShotgunClipinAnimationSpeed" },
+    equipTimes = { EquipTime = 0.12, SwitchTime = 0.12 },
+    equipAnims = { "EquippedAnimationSpeed", "VMEquippedAnimationSpeed", "SwitchAnimationSpeed", "VMSwitchAnimationSpeed" },
+}
+
+function Tune.Orig(tbl, key)
+    local rec = Tune.orig[tbl]
+    if not rec then rec = {}; Tune.orig[tbl] = rec end
+    if rec[key] == nil then
+        local v = rawget(tbl, key)
+        if v == nil then return nil end
+        rec[key] = v
+    end
+    return rec[key]
+end
+
+-- ลดค่าเวลาทุกตัวในกลุ่ม แล้วเร่งความเร็วอนิเมชันตามสัดส่วนจริงที่ลดได้
+function Tune.Group(tbl, times, anims, mult, enabled)
+    local ratio
+    for key, floor in pairs(times) do
+        local o = Tune.Orig(tbl, key)
+        if type(o) == "number" and o > 0 then
+            local new = o
+            if enabled then new = math.max(o / mult, math.min(o, floor)) end
+            pcall(rawset, tbl, key, new)
+            if key == "ReloadTime" or key == "EquipTime" or not ratio then ratio = o / new end
+        end
+    end
+    for _, key in ipairs(anims) do
+        local o = Tune.Orig(tbl, key)
+        if type(o) == "number" and o > 0 then
+            pcall(rawset, tbl, key, enabled and o * (ratio or mult) or o)
+        end
+    end
+end
+
+function Tune.Setting(tool)
+    local cached = Tune.tools[tool]
+    if cached ~= nil then return cached or nil end
+    local mod = tool:FindFirstChild("Setting")
+    if not (mod and mod:IsA("ModuleScript")) then return nil end
+    local ok, res = pcall(require, mod)
+    local tbl = (ok and type(res) == "table") and res or false
+    Tune.tools[tool] = tbl
+    return tbl or nil
+end
+
+function Tune.Refresh()
+    local mult = math.clamp((tonumber(Config.ReloadMult) or 200) / 100, 1, 3)
+    local function apply(tool)
+        if not tool:IsA("Tool") then return end
+        local tbl = Tune.Setting(tool)
+        if not tbl then return end
+        Tune.Group(tbl, Tune.reloadTimes, Tune.reloadAnims, mult, Config.FastReload)
+        Tune.Group(tbl, Tune.equipTimes, Tune.equipAnims, 3, Config.FastEquip)
+    end
+    local char = LocalPlayer.Character
+    if char then for _, c in ipairs(char:GetChildren()) do apply(c) end end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if bp then for _, c in ipairs(bp:GetChildren()) do apply(c) end end
+end
+
+function Tune.Restore()
+    for tbl, rec in pairs(Tune.orig) do
+        for key, value in pairs(rec) do pcall(rawset, tbl, key, value) end
+    end
+    table.clear(Tune.orig)
+end
+
+-- เรียกทุกครั้งที่เปิด/ปิดสวิตช์ (ตัวเลื่อนปรับความเร็วไม่ต้องเรียก เพราะลูปคำนวณใหม่ทุก 1 วินาที)
+function Tune.Update()
+    Tune.token += 1
+    local token = Tune.token
+    if not (Config.FastReload or Config.FastEquip) then
+        Tune.Restore()
+        return
+    end
+    task.spawn(function()
+        while (Config.FastReload or Config.FastEquip) and Tune.token == token do
+            pcall(Tune.Refresh)
+            task.wait(1)
+        end
+    end)
+end
+
+-- ===== เตือนเมื่อมีคนเล็งใส่เรา =====
+-- ดูทิศลำกล้องของปืนที่ผู้เล่นคนอื่นถืออยู่ (จุด GunFirePoint เทียบกับ Handle)
+-- ถ้าแนวกระบอกพุ่งมาทางตัวเรานานเกิน 0.2 วินาที จะขึ้นลูกศรเล็กๆ รอบกลางจอบอกทิศ
+local AimWarn = { state = {}, list = {}, slots = {}, gui = nil, conn = nil, acc = 0 }
+
+function AimWarn.Barrel(char)
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then return nil end
+    local handle = tool:FindFirstChild("Handle")
+    if not (handle and handle:IsA("BasePart")) then return nil end
+    local fp = handle:FindFirstChild("GunFirePoint")
+    if fp and fp:IsA("Attachment") then
+        local muzzle = fp.WorldPosition
+        local d = muzzle - handle.Position
+        if d.Magnitude >= 0.25 then return muzzle, d.Unit end
+        return muzzle, fp.WorldCFrame.LookVector
+    end
+    if tool:FindFirstChild("Setting") then
+        local root, head = char:FindFirstChild("HumanoidRootPart"), char:FindFirstChild("Head")
+        if root and head then return head.Position, root.CFrame.LookVector end
+    end
+    return nil
+end
+
+-- คืน true, ระยะ ถ้าผู้เล่นคนนี้กำลังเล็งมาที่ตำแหน่งเรา
+function AimWarn.Check(plr, myPos, myChar, range)
+    local char = plr.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local muzzle, dir = AimWarn.Barrel(char)
+    if not muzzle then return false end
+
+    local v = myPos - muzzle
+    local dist = v.Magnitude
+    if dist > range or dist < 3 or v:Dot(dir) <= 0 then return false end
+
+    -- เช็คแนวซ้าย-ขวาก่อน (แม่นกว่าแนวสูง-ต่ำ เพราะทิศลำกล้องที่ประเมินอาจเอียงเล็กน้อย)
+    local dh = Vector3.new(dir.X, 0, dir.Z)
+    if dh.Magnitude < 0.2 then return false end
+    dh = dh.Unit
+    local vh = Vector3.new(v.X, 0, v.Z)
+    local along = vh:Dot(dh)
+    if along <= 0 then return false end
+    if (vh - dh * along).Magnitude > 2 + dist * 0.06 then return false end
+
+    -- แนวสูง-ต่ำ ยอมให้คลาดได้ 25 องศา
+    local pitchDir = math.deg(math.asin(math.clamp(dir.Y, -1, 1)))
+    local pitchTo = math.deg(math.asin(math.clamp(v.Y / dist, -1, 1)))
+    if math.abs(pitchDir - pitchTo) > 25 then return false end
+
+    if Config.AimWarnWall then
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = {char, myChar}
+        params.RespectCanCollide = true
+        if Workspace:Raycast(muzzle, v, params) then return false end
+    end
+    return true, dist
+end
+
+function AimWarn.Scan()
+    local now = os.clock()
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    table.clear(AimWarn.list)
+    if not myRoot then return end
+    local range = tonumber(Config.AimWarnRange) or 120
+
+    for plr, st in pairs(AimWarn.state) do
+        if not plr.Parent or now - st.last > 1 then AimWarn.state[plr] = nil end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local skipped = false
+            pcall(function() skipped = IsSkipped(plr) end)
+            if not skipped then
+                local ok, hit, dist = pcall(AimWarn.Check, plr, myRoot.Position, myChar, range)
+                if ok and hit then
+                    local st = AimWarn.state[plr]
+                    if not st then
+                        st = { since = now, last = now }
+                        AimWarn.state[plr] = st
+                    elseif now - st.last > 0.3 then
+                        st.since = now -- เล็งขาดช่วงไปนาน ให้เริ่มนับใหม่
+                    end
+                    st.last, st.dist = now, dist
+                end
+            end
+        end
+    end
+    for plr, st in pairs(AimWarn.state) do
+        if now - st.last <= 0.5 and st.last - st.since >= 0.2 then
+            table.insert(AimWarn.list, { plr = plr, st = st })
+        end
+    end
+    table.sort(AimWarn.list, function(a, b) return (a.st.dist or 0) < (b.st.dist or 0) end)
+end
+
+function AimWarn.Build()
+    if AimWarn.gui and AimWarn.gui.Parent then return end
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "CHUB_AimWarn"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 20
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    pcall(function() gui.Parent = (typeof(gethui) == "function" and gethui()) or CoreGui end)
+    if not gui.Parent then
+        pcall(function() gui.Parent = LocalPlayer:WaitForChild("PlayerGui", 5) end)
+    end
+    AimWarn.gui = gui
+    AimWarn.slots = {}
+    for i = 1, 3 do
+        local holder = Instance.new("Frame")
+        holder.Name = "Slot" .. i
+        holder.BackgroundTransparency = 1
+        holder.AnchorPoint = Vector2.new(0.5, 0.5)
+        holder.Size = UDim2.fromOffset(120, 44)
+        holder.Visible = false
+        holder.Parent = gui
+
+        local arrow = Instance.new("TextLabel")
+        arrow.Name = "Arrow"
+        arrow.BackgroundTransparency = 1
+        arrow.AnchorPoint = Vector2.new(0.5, 0)
+        arrow.Position = UDim2.new(0.5, 0, 0, 0)
+        arrow.Size = UDim2.fromOffset(28, 28)
+        arrow.Font = Enum.Font.GothamBold
+        arrow.Text = "▲"
+        arrow.TextSize = 22
+        arrow.TextColor3 = Color3.fromRGB(255, 82, 72)
+        arrow.TextStrokeColor3 = Color3.new(0, 0, 0)
+        arrow.Parent = holder
+
+        local label = Instance.new("TextLabel")
+        label.Name = "Name"
+        label.BackgroundTransparency = 1
+        label.Position = UDim2.new(0, 0, 0, 27)
+        label.Size = UDim2.new(1, 0, 0, 14)
+        label.Font = Enum.Font.GothamMedium
+        label.Text = ""
+        label.TextSize = 11
+        label.TextColor3 = Color3.fromRGB(240, 240, 240)
+        label.TextStrokeColor3 = Color3.new(0, 0, 0)
+        label.Parent = holder
+
+        AimWarn.slots[i] = { holder = holder, arrow = arrow, label = label }
+    end
+end
+
+local function ShortName(s)
+    local n = utf8.len(s)
+    if n and n > 12 then return string.sub(s, 1, utf8.offset(s, 13) - 1) .. "…" end
+    return s
+end
+
+function AimWarn.Render()
+    if not AimWarn.gui then return end
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local now = os.clock()
+    local vp = cam.ViewportSize
+    local scale = math.clamp((tonumber(Config.AimWarnScale) or 100) / 100, 0.6, 1.5)
+    local radius = math.clamp(vp.Y * 0.16, 95, 170)
+
+    for i, slot in ipairs(AimWarn.slots) do
+        local entry = AimWarn.list[i]
+        local root = entry and entry.plr.Character and entry.plr.Character:FindFirstChild("HumanoidRootPart")
+        if entry and root then
+            local rel = cam.CFrame:PointToObjectSpace(root.Position)
+            local v = Vector2.new(rel.X, rel.Z)
+            if v.Magnitude < 0.001 then v = Vector2.new(0, -1) end
+            v = v.Unit
+            slot.holder.Position = UDim2.fromOffset(vp.X / 2 + v.X * radius, vp.Y / 2 + v.Y * radius)
+            slot.arrow.Rotation = math.deg(math.atan2(v.X, -v.Y))
+            slot.arrow.TextSize = math.floor(22 * scale)
+            slot.arrow.Size = UDim2.fromOffset(math.floor(28 * scale), math.floor(28 * scale))
+            slot.label.TextSize = math.max(9, math.floor(11 * scale))
+            slot.label.Position = UDim2.new(0, 0, 0, math.floor(27 * scale))
+            slot.label.Text = string.format("%s · %dm", ShortName(entry.plr.DisplayName), math.floor(entry.st.dist or 0))
+
+            local fadeOut = math.clamp(1 - (now - entry.st.last) / 0.5, 0, 1)
+            local fadeIn = math.clamp((now - (entry.st.since + 0.2)) / 0.15, 0, 1)
+            local a = fadeOut * fadeIn
+            slot.arrow.TextTransparency = 1 - a * 0.92
+            slot.arrow.TextStrokeTransparency = 1 - a * 0.6
+            slot.label.TextTransparency = 1 - a * 0.85
+            slot.label.TextStrokeTransparency = 1 - a * 0.55
+            slot.holder.Visible = true
+        else
+            slot.holder.Visible = false
+        end
+    end
+end
+
+function AimWarn.Start()
+    if AimWarn.conn then return end
+    AimWarn.Build()
+    AimWarn.conn = RunService.RenderStepped:Connect(function(dt)
+        AimWarn.acc += dt
+        if AimWarn.acc >= 0.07 then
+            AimWarn.acc = 0
+            pcall(AimWarn.Scan)
+        end
+        pcall(AimWarn.Render)
+    end)
+end
+
+function AimWarn.Stop()
+    if AimWarn.conn then AimWarn.conn:Disconnect(); AimWarn.conn = nil end
+    table.clear(AimWarn.state)
+    table.clear(AimWarn.list)
+    if AimWarn.gui then pcall(function() AimWarn.gui:Destroy() end) end
+    AimWarn.gui, AimWarn.slots = nil, {}
 end
 
 local function HookProjectile()
@@ -3622,6 +3940,53 @@ Safe("CombatTab", function()
         end,
         "NoSpread"
     )
+
+    Tg.FastReload = CombatGroup:Toggle(
+        "รีโหลดไว",
+        "ลดเวลารีโหลด (มีเพดานขั้นต่ำกันเร็วเกินจริง)",
+        false,
+        function(state)
+            Config.FastReload = state
+            Tune.Update()
+        end,
+        "FastReload"
+    )
+
+    CombatGroup:Slider("ความเร็วรีโหลด", 100, 300, 200, "%", function(value)
+        Config.ReloadMult = value
+    end, 10, "ReloadMult")
+
+    Tg.FastEquip = CombatGroup:Toggle(
+        "ชักปืน / เปลี่ยนปืนไว",
+        "ลดเวลารอตอนหยิบปืนขึ้นมาและสลับปืน",
+        false,
+        function(state)
+            Config.FastEquip = state
+            Tune.Update()
+        end,
+        "FastEquip"
+    )
+
+    local WarnGroup = CombatTab:Group("เตือนภัย", "Right")
+
+    Tg.AimWarn = WarnGroup:Toggle(
+        "เตือนเมื่อมีคนเล็งใส่",
+        "ขึ้นลูกศรเล็กๆ รอบกลางจอ บอกทิศคนที่เล็งมาที่เรา (สูงสุด 3 คน)",
+        false,
+        function(state)
+            Config.AimWarn = state
+            if state then AimWarn.Start() else AimWarn.Stop() end
+        end,
+        "AimWarn"
+    )
+
+    WarnGroup:Slider("ระยะเตือน", 30, 250, 120, "studs", function(value)
+        Config.AimWarnRange = value
+    end, 10, "AimWarnRange")
+
+    WarnGroup:Slider("ขนาดตัวเตือน", 60, 150, 100, "%", function(value)
+        Config.AimWarnScale = value
+    end, 10, "AimWarnScale")
 end)
 
 local VisualTab = Win:Tab({
@@ -4777,6 +5142,10 @@ getgenv().__CipherCleanup = function()
         Config.NoRecoil = false
         Config.NoSpread = false
         pcall(function() Recoil.token += 1; Recoil.Restore() end)
+        Config.FastReload = false
+        Config.FastEquip = false
+        pcall(Tune.Update)
+        pcall(AimWarn.Stop)
         if getgenv().__SentorumSailueat and getgenv().__SentorumSailueat.Cleanup then
             getgenv().__SentorumSailueat.Cleanup()
         end
