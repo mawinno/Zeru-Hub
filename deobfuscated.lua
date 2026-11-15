@@ -3106,9 +3106,6 @@ local AimTab = Win:Tab({
 local AimGroupL = AimTab:Group("Aim Settings", "Left")
 local AimGroupR = AimTab:Group("Aim Extra", "Right")
 
-local AimGroupL = AimTab:Group("Aim Settings", "Left")
-local AimGroupR = AimTab:Group("Aim Extra", "Right")
-
 -- ===== ตรวจสอบอุปกรณ์ =====
 local UserInputService = game:GetService("UserInputService")
 local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
@@ -3160,7 +3157,7 @@ end, "ShowTracer")
 -- ส่วนของ Keybind / ปุ่มลอย (แยกตามอุปกรณ์)
 -- ============================================================
 
--- สร้างกลุ่มใหม่สำหรับ Keybind ใน AimTab
+-- สร้างกลุ่มใหม่สำหรับ Keybind ใน AimTab (มันจะไปอยู่ด้านล่าง Skip List)
 local KeybindGroup = AimTab:Group("Keybind & Mode", "Left")
 
 -- ตัวแปรสำหรับเก็บการตั้งค่า
@@ -3248,7 +3245,7 @@ if IsMobile then
         btn.Text = "AIM"
         btn.TextSize = 14
         btn.BorderSizePixel = 0
-        btn.Parent = OverlayGui -- ใช้ OverlayGui ที่มีอยู่แล้ว
+        btn.Parent = OverlayGui
         
         local corner = Instance.new("UICorner", btn)
         corner.CornerRadius = UDim.new(0, 10)
@@ -3290,89 +3287,6 @@ if IsMobile then
     
     CreateMobileButton()
 end
--- ใส่รูปโปรไฟล์หน้าชื่อผู้เล่นแต่ละแถวในรายการ (ต้องเรียกใหม่ทุกครั้งที่ Refresh)
-local function DecorateSkipList()
-    if not SkipDropdown or not SkipDropdown.Instance then return end
-
-    local list = SkipDropdown.Instance:FindFirstChildOfClass("ScrollingFrame")
-    if not list then return end
-
-    for _, btn in ipairs(list:GetChildren()) do
-        if btn:IsA("TextButton") and not btn:FindFirstChild("Avatar") then
-            local lbl = btn:FindFirstChildOfClass("TextLabel")
-            local name = lbl and SkipOptionToName[lbl.Text]
-            local plr = name and Players:FindFirstChild(name)
-
-            if plr then
-                lbl.Position = UDim2.fromOffset(36, 0)
-                lbl.Size = UDim2.new(1, -56, 1, 0)
-
-                local img = Instance.new("ImageLabel")
-                img.Name = "Avatar"
-                img.Position = UDim2.fromOffset(8, 4)
-                img.Size = UDim2.fromOffset(20, 20)
-                img.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-                img.BorderSizePixel = 0
-                img.Parent = btn
-
-                Instance.new("UICorner", img).CornerRadius = UDim.new(1, 0)
-
-                LoadAvatar(plr.UserId, img)
-            end
-        end
-    end
-end
-
-local function RefreshSkipList()
-    if not SkipDropdown then return end
-
-    SkipDropdown.Refresh(BuildSkipOptions())
-    SyncSkipSet(SkipDropdown.Get())
-    DecorateSkipList()
-end
-
-SkipGroup:Toggle("ข้ามเพื่อน", "ไม่ล็อกคนที่เป็นเพื่อนของคุณ", false, function(state)
-    Config.SkipFriends = state
-end, "SkipFriends")
-
-SkipDropdown = SkipGroup:Dropdown({
-    Title = "ข้ามผู้เล่น",
-    Options = BuildSkipOptions(),
-    Default = {},
-    Multi = true,
-    Callback = function(list)
-        SyncSkipSet(list)
-    end,
-    Flag = "SkipPlayers"
-})
-
-DecorateSkipList()
-
-SkipGroup:Button("ล้างรายชื่อข้าม", "ยกเลิกการข้ามทุกคน", function()
-    SkipDropdown.Set({})
-end)
-
-for _, p in ipairs(Players:GetPlayers()) do
-    if p ~= LocalPlayer then
-        RefreshFriend(p)
-    end
-end
-
-Players.PlayerAdded:Connect(function(p)
-    RefreshFriend(p)
-    task.delay(0.2, RefreshSkipList)
-end)
-
-Players.PlayerRemoving:Connect(function()
-    task.delay(0.2, RefreshSkipList)
-end)
-end)
-
-local VisualTab = Win:Tab({
-    Title = "ESP",
-    Subtitle = "ESP & Overlay",
-    Icon = 10734942565
-})
 
 local VisualGroupL = VisualTab:Group("ESP Settings", "Left")
 local VisualGroupR = VisualTab:Group("ESP Extra", "Right")
@@ -4428,7 +4342,7 @@ WMLabel2.TextSize = 9
 WMLabel2.TextColor3 = Color3.fromRGB(120, 200, 255)
 WMLabel2.TextStrokeTransparency = 0.7
 WMLabel2.TextXAlignment = Enum.TextXAlignment.Right
-WMLabel2.Text = "v2.0 | Premium"
+WMLabel2.Text = "v6.0 | Premium"
 WMLabel2.Parent = Watermark
 
 -- [9] เพิ่ม Splash screen ตอนโหลด (เท่ๆ)
@@ -4470,7 +4384,7 @@ SplashSub.BackgroundTransparency = 1
 SplashSub.Font = Enum.Font.Gotham
 SplashSub.TextSize = 14
 SplashSub.TextColor3 = Color3.fromRGB(180, 220, 255)
-SplashSub.Text = "Premium Script v2.0 — Loading..."
+SplashSub.Text = "Premium Script v6.0 — Loading..."
 SplashSub.Parent = SplashBG
 
 local SplashStroke = Instance.new("UIStroke", SplashTitle)
