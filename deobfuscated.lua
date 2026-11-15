@@ -315,9 +315,8 @@ end
 GetAimCenter = function()
     Camera = Workspace.CurrentCamera or Camera
     if MouseAimConfig.Center == "เมาส์" and not UserInputService.TouchEnabled then
-        local mouseLoc = UserInputService:GetMouseLocation()
-        local inset = GuiService:GetGuiInset()
-        return mouseLoc - inset
+        -- ใช้ Mouse.X/Y แทน เพราะ Executor บล็อก GetMouseLocation
+        return Vector2.new(Mouse.X, Mouse.Y)
     end
     return Camera and Camera.ViewportSize / 2 or Vector2.zero
 end
