@@ -270,39 +270,75 @@ local function GetSmoothedTargetPosition(targetPart)
     return smoothed
 end
 
--- ===== Hook Mouse Object =====
-local oldIndex
-oldIndex = hookmetamethod(game, "__index", function(self, key)
-    if MouseAimConfig.Enabled and rawequal(self, Mouse) then
-        -- สุ่มโอกาสยิงเข้าเป้า (ถ้าสุ่มไม่ติด ให้คืนค่าเมาส์ปกติ)
-        local shouldLock = math.random(1, 100) <= MouseAimConfig.HitChance
-        if shouldLock then
-            local target = GetClosestTarget()
-            if target then
-                local targetPos = GetSmoothedTargetPosition(target)
-                if targetPos then
-                    if key == "Hit" then
-                        return CFrame.new(targetPos)
-                    elseif key == "Target" then
-                        return target
-                    elseif key == "UnitRay" then
-                        local origin = Camera.CFrame.Position
-                        local direction = (targetPos - origin).Unit
-                        return Ray.new(origin, direction)
-                    elseif key == "Origin" then
-                        return Camera.CFrame.Position
-                    elseif key == "X" then
-                        local screenPos = Camera:WorldToViewportPoint(targetPos)
-                        return screenPos.X
-                    elseif key == "Y" then
-                        local screenPos = Camera:WorldToViewportPoint(targetPos)
-                        return screenPos.Y
-                    end
-                end
+-- ===== ระบบ Bypass: สร้าง Mouse ปลอม (ไม่ใช้ hookmetamethod) =====
+local MouseSpoofer = {}
+
+-- ฟังก์ชันคำนวณตำแหน่งเมาส์ปลอม
+function MouseSpoofer:Update()
+    if not MouseAimConfig.Enabled then
+        MouseSpoofer.Enabled = false
+        return
+    end
+
+    local shouldLock = math.random(1, 100) <= MouseAimConfig.HitChance
+    if not shouldLock then
+        MouseSpoofer.Enabled = false
+        return
+    end
+
+    local target = GetClosestTarget()
+    if target then
+        local targetPos = GetSmoothedTargetPosition(target)
+        if targetPos then
+            MouseSpoofer.Enabled = true
+            MouseSpoofer.Position = targetPos
+            MouseSpoofer.TargetPart = target
+            MouseSpoofer.ScreenPos = Camera:WorldToViewportPoint(targetPos)
+        end
+    else
+        MouseSpoofer.Enabled = false
+    end
+end
+
+-- สร้าง Mouse ปลอม
+local fakeMouse = {
+    Hit = CFrame.new(),
+    Target = nil,
+    UnitRay = Ray.new(Vector3.zero, Vector3.zero),
+    Origin = Vector3.zero,
+    X = 0,
+    Y = 0,
+    ViewSizeX = 0,
+    ViewSizeY = 0,
+}
+
+-- ใช้ Metatable ในการดักจับการอ่านค่าจาก Mouse ปลอม (ไม่แตะ Game Metatable)
+setmetatable(fakeMouse, {
+    __index = function(t, k)
+        if MouseSpoofer.Enabled then
+            if k == "Hit" then
+                return CFrame.new(MouseSpoofer.Position)
+            elseif k == "Target" then
+                return MouseSpoofer.TargetPart
+            elseif k == "UnitRay" then
+                local origin = Camera.CFrame.Position
+                local direction = (MouseSpoofer.Position - origin).Unit
+                return Ray.new(origin, direction)
+            elseif k == "Origin" then
+                return Camera.CFrame.Position
+            elseif k == "X" then
+                return MouseSpoofer.ScreenPos.X
+            elseif k == "Y" then
+                return MouseSpoofer.ScreenPos.Y
             end
         end
-    end
-    return oldIndex(self, key)
+        return t[k] or Mouse[k] -- ถ้าไม่ได้เปิดระบบ ให้คืนค่าเมาส์จริง
+    end,
+})
+
+-- อัปเดตตำแหน่ง Mouse ปลอมทุกเฟรม
+RunService.RenderStepped:Connect(function()
+    MouseSpoofer:Update()
 end)
 
 
