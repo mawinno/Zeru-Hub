@@ -3106,7 +3106,15 @@ local AimTab = Win:Tab({
 local AimGroupL = AimTab:Group("Aim Settings", "Left")
 local AimGroupR = AimTab:Group("Aim Extra", "Right")
 
--- ===== CAMERA LOCK UI =====
+local AimGroupL = AimTab:Group("Aim Settings", "Left")
+local AimGroupR = AimTab:Group("Aim Extra", "Right")
+
+-- ===== ตรวจสอบอุปกรณ์ =====
+local UserInputService = game:GetService("UserInputService")
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local IsPC = UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled
+
+-- ===== UI หลัก (ทั้ง PC และ มือถือเห็นเหมือนกัน) =====
 Tg.CameraLock = AimGroupL:Toggle("Camera Lock", "ล็อกกล้องไปที่ศัตรู (บายพาส 100%)", false, function(state)
     CameraLockConfig.Enabled = state
 end, "CameraLock")
@@ -3147,83 +3155,141 @@ end, "ShowFOV")
 Tg.TargetLine = AimGroupR:Toggle("เส้นชี้เป้า", "แสดงเส้นจากกลางจอไปหาศัตรู", false, function(state)
     Config.ShowTracer = state
 end, "ShowTracer")
-AimGroupR:Button("รีฮุกระบบยิง", "ค้นหา ProjectileHandler และติดตั้ง Hook ใหม่", function()
-    Hooked = false
-    hookStatus = "กำลังค้นหา Hook..."
 
-    task.spawn(function()
-        local ok = HookProjectile()
+-- ============================================================
+-- ส่วนของ Keybind / ปุ่มลอย (แยกตามอุปกรณ์)
+-- ============================================================
 
-        Win:Notify({
-            Title = "CipherHUB",
-            Content = ok and "Hook สำเร็จ" or "ไม่พบ ProjectileHandler ดู Console (F9)",
-            Duration = 3,
-            Type = ok and "Success" or "Warning"
-        })
-    end)
-end)
+-- สร้างกลุ่มใหม่สำหรับ Keybind ใน AimTab
+local KeybindGroup = AimTab:Group("Keybind & Mode", "Left")
 
-Safe("SkipList", function()
-local SkipGroup = AimTab:Group("Skip List", "Left")
+-- ตัวแปรสำหรับเก็บการตั้งค่า
+local KeybindConfig = {
+    Mode = "Toggle",
+    BoundKey = Enum.KeyCode.E,
+    IsBinding = false,
+}
 
-local function BuildSkipOptions()
-    local opts = {}
-    table.clear(SkipOptionToName)
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            local label = p.DisplayName .. " (@" .. p.Name .. ")"
-            SkipOptionToName[label] = p.Name
-            table.insert(opts, label)
-        end
-    end
-
-    table.sort(opts)
-
-    return opts
-end
-
-local function SyncSkipSet(list)
-    table.clear(SkipSet)
-
-    for _, label in ipairs(list) do
-        local name = SkipOptionToName[label]
-
-        if name then
-            SkipSet[name] = true
-        end
+-- ฟังก์ชันอัปเดตสถานะ Camera Lock
+local function UpdateCameraLockState(active)
+    CameraLockConfig.Enabled = active
+    if Tg.CameraLock then
+        Tg.CameraLock.Set(active)
     end
 end
 
-local AvatarCache = {}
+-- -------------------------------------------
+-- [ส่วนของ PC] จะแสดงเฉพาะเมื่อใช้คอมพิวเตอร์
+-- -------------------------------------------
+if IsPC then
+    KeybindGroup:Dropdown("โหมดการกด (PC)", {"Toggle (กดติด-ดับ)", "Hold (กดค้าง)"}, "Toggle (กดติด-ดับ)", function(value)
+        KeybindConfig.Mode = (value == "Toggle (กดติด-ดับ)") and "Toggle" or "Hold"
+    end, "CameraLockModePC")
 
-local function LoadAvatar(userId, image)
-    local cached = AvatarCache[userId]
+    KeybindGroup:Button("เปลี่ยนปุ่มลัด (PC)", "กดเพื่อเปลี่ยนปุ่มลัดปัจจุบัน", function()
+        KeybindConfig.IsBinding = true
+        Win:Notify({Title = "CipherHUB", Content = "กรุณากดปุ่มที่ต้องการบันทึก...", Duration = 3, Type = "Info"})
+    end, "CameraLockBindPC")
 
-    if cached then
-        image.Image = cached
-        return
-    end
-
-    task.spawn(function()
-        local ok, content = pcall(function()
-            return Players:GetUserThumbnailAsync(
-                userId,
-                Enum.ThumbnailType.HeadShot,
-                Enum.ThumbnailSize.Size48x48
-            )
-        end)
-
-        if ok and content then
-            AvatarCache[userId] = content
-
-            if image.Parent then
-                image.Image = content
+    -- ดักจับการกดปุ่ม
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        
+        if KeybindConfig.IsBinding then
+            if input.UserInputType == Enum.UserInputType.Keyboard then
+                KeybindConfig.BoundKey = input.KeyCode
+                KeybindConfig.IsBinding = false
+                Win:Notify({Title = "CipherHUB", Content = "บันทึกปุ่ม: " .. input.KeyCode.Name, Duration = 2, Type = "Success"})
+            elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.MouseButton2 then
+                KeybindConfig.BoundKey = input.UserInputType.Name
+                KeybindConfig.IsBinding = false
+                Win:Notify({Title = "CipherHUB", Content = "บันทึกปุ่ม: " .. input.UserInputType.Name, Duration = 2, Type = "Success"})
+            end
+            return
+        end
+        
+        if input.KeyCode == KeybindConfig.BoundKey or input.UserInputType.Name == KeybindConfig.BoundKey then
+            if KeybindConfig.Mode == "Toggle" then
+                UpdateCameraLockState(not CameraLockConfig.Enabled)
+            elseif KeybindConfig.Mode == "Hold" then
+                UpdateCameraLockState(true)
             end
         end
     end)
+
+    UserInputService.InputEnded:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if KeybindConfig.Mode == "Hold" and (input.KeyCode == KeybindConfig.BoundKey or input.UserInputType.Name == KeybindConfig.BoundKey) then
+            UpdateCameraLockState(false)
+        end
+    end)
 end
 
+-- -------------------------------------------
+-- [ส่วนของมือถือ] จะแสดงเฉพาะเมื่อใช้มือถือ
+-- -------------------------------------------
+if IsMobile then
+    KeybindGroup:Dropdown("โหมดการกด (มือถือ)", {"Toggle (กดติด-ดับ)", "Hold (กดค้าง)"}, "Toggle (กดติด-ดับ)", function(value)
+        KeybindConfig.Mode = (value == "Toggle (กดติด-ดับ)") and "Toggle" or "Hold"
+    end, "CameraLockModeMobile")
+
+    KeybindGroup:Label("ใช้ปุ่ม 'AIM' ที่ลอยอยู่มุมซ้ายหน้าจอ", "คำแนะนำ")
+
+    -- สร้างปุ่มลอยสำหรับมือถือ
+    local function CreateMobileButton()
+        local btn = Instance.new("TextButton")
+        btn.Name = "CipherTouchBtn"
+        btn.Size = UDim2.new(0, 60, 0, 60)
+        btn.Position = UDim2.new(0, 20, 0.5, -30)
+        btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        btn.BackgroundTransparency = 0.3
+        btn.TextColor3 = Color3.fromRGB(0, 220, 255)
+        btn.Font = Enum.Font.GothamBold
+        btn.Text = "AIM"
+        btn.TextSize = 14
+        btn.BorderSizePixel = 0
+        btn.Parent = OverlayGui -- ใช้ OverlayGui ที่มีอยู่แล้ว
+        
+        local corner = Instance.new("UICorner", btn)
+        corner.CornerRadius = UDim.new(0, 10)
+        
+        local stroke = Instance.new("UIStroke", btn)
+        stroke.Color = Color3.fromRGB(0, 220, 255)
+        stroke.Thickness = 1.5
+        
+        local isHolding = false
+        
+        btn.MouseButton1Down:Connect(function()
+            if KeybindConfig.Mode == "Hold" then
+                UpdateCameraLockState(true)
+                btn.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
+                isHolding = true
+            elseif KeybindConfig.Mode == "Toggle" then
+                UpdateCameraLockState(not CameraLockConfig.Enabled)
+            end
+        end)
+        
+        btn.MouseButton1Up:Connect(function()
+            if KeybindConfig.Mode == "Hold" and isHolding then
+                UpdateCameraLockState(false)
+                btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+                isHolding = false
+            end
+        end)
+        
+        RunService.RenderStepped:Connect(function()
+            if KeybindConfig.Mode == "Toggle" then
+                if CameraLockConfig.Enabled then
+                    btn.BackgroundColor3 = Color3.fromRGB(0, 150, 200)
+                else
+                    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+                end
+            end
+        end)
+    end
+    
+    CreateMobileButton()
+end
 -- ใส่รูปโปรไฟล์หน้าชื่อผู้เล่นแต่ละแถวในรายการ (ต้องเรียกใหม่ทุกครั้งที่ Refresh)
 local function DecorateSkipList()
     if not SkipDropdown or not SkipDropdown.Instance then return end
@@ -4428,7 +4494,7 @@ end)
 -- [10] Debug helper (เปลี่ยนชื่อ)
 getgenv().CipherDebug = function()
     print("=== CIPHER HUB DEBUG ===")
-    print("Version: v2.0")
+    print("Version: v6.0")
     print("SilentAim:", Config.SilentAim)
     print("Hooked:", Hooked)
     print("Hook status:", hookStatus)
