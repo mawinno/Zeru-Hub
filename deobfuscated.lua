@@ -3103,195 +3103,298 @@ local AimTab = Win:Tab({
     Icon = Flexozy.Icons.Sword
 })
 
+-- ============================================================
+-- CAMERA LOCK : UI + ระบบคีย์ลัด (PC) + ปุ่มลอย (มือถือ)
+-- ------------------------------------------------------------
+-- วิธีใช้: วาง "แทนที่" โค้ด Aim UI เดิมทั้งหมด ตั้งแต่บรรทัด
+--   local AimGroupL = AimTab:Group("Aim Settings", "Left")
+-- ไปจนถึงท้ายส่วนมือถือ (CreateMobileButton() / end) ก่อนบรรทัด
+--   local VisualGroupL = VisualTab:Group(...)
+-- ต้องวางหลังบรรทัด  local AimTab = Win:Tab({...})
+-- และหลังบรรทัดที่ประกาศ CameraLockConfig, Tg, Config, ProtectParent
+-- ห้ามแก้ลูป RenderStepped ของ Camera Lock เดิม
+-- ============================================================
+
+-- กัน error "attempt to index nil with 'Group'" และบอกสาเหตุให้ชัดเจน
+assert(AimTab, "[CameraLock] AimTab เป็น nil - ต้องวางโค้ดนี้ต่อจาก local AimTab = Win:Tab({...})")
+
+-- ===== สร้างกลุ่ม UI (สร้างครั้งเดียว ไม่อยู่ในลูป) =====
 local AimGroupL = AimTab:Group("Aim Settings", "Left")
 local AimGroupR = AimTab:Group("Aim Extra", "Right")
 
--- ===== ตรวจสอบอุปกรณ์ =====
-local UserInputService = game:GetService("UserInputService")
-local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-local IsPC = UserInputService.KeyboardEnabled and not UserInputService.TouchEnabled
+-- ครอบด้วย do ... end เพื่อไม่ให้ใช้โควตา local ของสคริปต์หลักเพิ่ม
+do
+    local UserInputService = game:GetService("UserInputService")
 
--- ===== UI หลัก (ทั้ง PC และ มือถือเห็นเหมือนกัน) =====
-Tg.CameraLock = AimGroupL:Toggle("Camera Lock", "ล็อกกล้องไปที่ศัตรู (บายพาส 100%)", false, function(state)
-    CameraLockConfig.Enabled = state
-end, "CameraLock")
+    -- ========================================================
+    -- 1) ตรวจสอบอุปกรณ์
+    -- ========================================================
+    local IsPC = UserInputService.KeyboardEnabled
+    -- มือถือ = มีจอสัมผัสและ "ไม่มี" คีย์บอร์ด (กัน Notebook จอสัมผัสถูกนับเป็นมือถือ)
+    local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
-AimGroupL:Slider("ความเร็วล็อกกล้อง", 1, 100, 25, "%", function(value)
-    CameraLockConfig.Smoothness = value / 100
-end, 1, "CameraSmoothness")
+    -- ========================================================
+    -- 2) ตัวแปรสถานะของระบบคีย์ลัด
+    -- ========================================================
+    local State = {
+        Mode = "Toggle",                 -- "Toggle" = กดติด/ดับ , "Hold" = กดค้าง
+        Binding = false,                 -- true = กำลังรอผู้ใช้กดปุ่มเพื่อตั้งคีย์ลัด
+        BindToken = nil,                 -- ใช้ยกเลิกการรอ (timeout)
+        BindKind = "KeyCode",            -- "KeyCode" (คีย์บอร์ด) หรือ "UserInputType" (ปุ่มเมาส์)
+        BindValue = Enum.KeyCode.E,      -- ปุ่มเริ่มต้น = E
+        HoldInput = nil,                 -- นิ้ว/ปุ่มที่กดปุ่ม AIM ค้างอยู่ (มือถือ โหมด Hold)
+    }
 
-AimGroupL:Slider("FOV", 60, 400, 180, "px", function(value)
-    CameraLockConfig.FOV = value
-end, 1, "FOV")
+    local COLOR_ON = Color3.fromRGB(0, 220, 255)   -- สีฟ้า Cyan (เปิดอยู่)
+    local COLOR_OFF = Color3.fromRGB(30, 30, 30)   -- สีเข้ม (ปิดอยู่)
+    local MobileButton = nil                       -- เก็บปุ่มลอยไว้เปลี่ยนสี
 
-AimGroupL:Slider("ระยะสูงสุด", 50, 2000, 800, "studs", function(value)
-    CameraLockConfig.MaxDistance = value
-end, 50, "MaxDistance")
-
-AimGroupL:Dropdown("ตำแหน่งยิง", {
-    "Head",
-    "HumanoidRootPart"
-}, "Head", function(value)
-    CameraLockConfig.TargetPart = value
-end, "AimPart")
-
-AimGroupR:Toggle("เช็คกำแพง", "ใช้กับ Camera Lock และกระเป๋า", false, function(state)
-    CameraLockConfig.WallCheck = state
-    Config.WallCheck = state
-end, "WallCheck")
-
-AimGroupR:Toggle("เช็คทีม", "ใช้กับ Camera Lock, ESP และกระเป๋า", false, function(state)
-    CameraLockConfig.TeamCheck = state
-    Config.TeamCheck = state
-end, "TeamCheck")
-
-Tg.ShowFOV = AimGroupR:Toggle("แสดง FOV", "แสดงวงกลม FOV บนหน้าจอ", false, function(state)
-    Config.ShowFOV = state
-end, "ShowFOV")
-
-Tg.TargetLine = AimGroupR:Toggle("เส้นชี้เป้า", "แสดงเส้นจากกลางจอไปหาศัตรู", false, function(state)
-    Config.ShowTracer = state
-end, "ShowTracer")
-
--- ============================================================
--- ส่วนของ Keybind / ปุ่มลอย (แยกตามอุปกรณ์)
--- ============================================================
-
--- สร้างกลุ่มใหม่สำหรับ Keybind ใน AimTab (มันจะไปอยู่ด้านล่าง Skip List)
-local KeybindGroup = AimTab:Group("Keybind & Mode", "Left")
-
--- ตัวแปรสำหรับเก็บการตั้งค่า
-local KeybindConfig = {
-    Mode = "Toggle",
-    BoundKey = Enum.KeyCode.E,
-    IsBinding = false,
-}
-
--- ฟังก์ชันอัปเดตสถานะ Camera Lock
-local function UpdateCameraLockState(active)
-    CameraLockConfig.Enabled = active
-    if Tg.CameraLock then
-        Tg.CameraLock.Set(active)
+    -- ฟังก์ชันแจ้งเตือน (ครอบ pcall กัน error ถ้า Notify มีปัญหา)
+    local function Notify(content, kind)
+        pcall(function()
+            Win:Notify({
+                Title = "CipherHUB",
+                Content = content,
+                Duration = 2,
+                Type = kind or "Info"
+            })
+        end)
     end
-end
 
--- -------------------------------------------
--- [ส่วนของ PC] จะแสดงเฉพาะเมื่อใช้คอมพิวเตอร์
--- -------------------------------------------
-if IsPC then
-    KeybindGroup:Dropdown("โหมดการกด (PC)", {"Toggle (กดติด-ดับ)", "Hold (กดค้าง)"}, "Toggle (กดติด-ดับ)", function(value)
-        KeybindConfig.Mode = (value == "Toggle (กดติด-ดับ)") and "Toggle" or "Hold"
-    end, "CameraLockModePC")
+    -- เปลี่ยนสีปุ่มลอยตามสถานะ เปิด/ปิด
+    local function RefreshMobileButton()
+        if not MobileButton then return end
+        local on = CameraLockConfig.Enabled
+        MobileButton.BackgroundColor3 = on and COLOR_ON or COLOR_OFF
+        MobileButton.TextColor3 = on and COLOR_OFF or COLOR_ON
+    end
 
-    KeybindGroup:Button("เปลี่ยนปุ่มลัด (PC)", "กดเพื่อเปลี่ยนปุ่มลัดปัจจุบัน", function()
-        KeybindConfig.IsBinding = true
-        Win:Notify({Title = "CipherHUB", Content = "กรุณากดปุ่มที่ต้องการบันทึก...", Duration = 3, Type = "Info"})
-    end, "CameraLockBindPC")
+    -- ฟังก์ชันกลาง: เปิด/ปิด Camera Lock (ใช้ร่วมกันทั้งคีย์ลัด, ปุ่มมือถือ)
+    -- จะอัปเดตสวิตช์ใน UI และสีปุ่มลอยให้ตรงกันเสมอ
+    local function SetCameraLock(active)
+        active = active and true or false
+        CameraLockConfig.Enabled = active
+        if Tg.CameraLock then
+            pcall(Tg.CameraLock.Set, active) -- ซิงก์สวิตช์ใน UI
+        end
+        RefreshMobileButton()
+    end
 
-    -- ดักจับการกดปุ่ม
-    UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        
-        if KeybindConfig.IsBinding then
-            if input.UserInputType == Enum.UserInputType.Keyboard then
-                KeybindConfig.BoundKey = input.KeyCode
-                KeybindConfig.IsBinding = false
-                Win:Notify({Title = "CipherHUB", Content = "บันทึกปุ่ม: " .. input.KeyCode.Name, Duration = 2, Type = "Success"})
-            elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.MouseButton2 then
-                KeybindConfig.BoundKey = input.UserInputType.Name
-                KeybindConfig.IsBinding = false
-                Win:Notify({Title = "CipherHUB", Content = "บันทึกปุ่ม: " .. input.UserInputType.Name, Duration = 2, Type = "Success"})
+    -- ========================================================
+    -- 3) Aim Settings UI
+    -- ========================================================
+
+    -- สวิตช์หลัก ผูกกับ CameraLockConfig.Enabled
+    Tg.CameraLock = AimGroupL:Toggle("Camera Lock", "ล็อกกล้องไปที่ศัตรู", false, function(state)
+        CameraLockConfig.Enabled = state
+        RefreshMobileButton()
+    end, "CameraLock")
+
+    -- Smoothness: ค่าสูง = กล้องหมุนตามเร็ว/กระตุกมากขึ้น, ค่าต่ำ = นุ่มและช้า
+    -- (ส่งเข้า Lerp โดยตรง ไม่ต้องแก้ลูปเดิม)
+    AimGroupL:Slider("Smoothness (ความเร็วล็อก)", 1, 100, 25, "%", function(value)
+        CameraLockConfig.Smoothness = value / 100
+    end, 1, "CameraSmoothness")
+
+    -- FOV (พิกเซลจากกลางจอ) ซิงก์กับ Config.FOV ด้วย เพื่อให้วงกลม FOV ขนาดตรงกัน
+    AimGroupL:Slider("FOV", 60, 400, 180, "px", function(value)
+        CameraLockConfig.FOV = value
+        Config.FOV = value
+    end, 1, "FOV")
+
+    -- ระยะสูงสุดที่ล็อกได้
+    AimGroupL:Slider("MaxDistance", 50, 2000, 800, "studs", function(value)
+        CameraLockConfig.MaxDistance = value
+        Config.MaxDistance = value
+    end, 50, "MaxDistance")
+
+    -- ส่วนของร่างกายที่จะล็อก
+    AimGroupL:Dropdown("Target Part", {
+        "Head",
+        "HumanoidRootPart"
+    }, "Head", function(value)
+        CameraLockConfig.TargetPart = value
+        Config.AimPart = value
+    end, "AimPart")
+
+    -- ตัวเลือกฝั่งขวา
+    AimGroupR:Toggle("Wall Check", "ไม่ล็อกเป้าที่อยู่หลังกำแพง", false, function(state)
+        CameraLockConfig.WallCheck = state
+        Config.WallCheck = state
+    end, "WallCheck")
+
+    AimGroupR:Toggle("Team Check", "ไม่ล็อกเพื่อนร่วมทีม", false, function(state)
+        CameraLockConfig.TeamCheck = state
+        Config.TeamCheck = state
+    end, "TeamCheck")
+
+    -- ต้องเก็บไว้ เพราะแท็บ Keybinds ด้านล่างอ้างถึง Tg.ShowFOV / Tg.TargetLine
+    Tg.ShowFOV = AimGroupR:Toggle("แสดง FOV", "แสดงวงกลม FOV บนหน้าจอ", false, function(state)
+        Config.ShowFOV = state
+    end, "ShowFOV")
+
+    Tg.TargetLine = AimGroupR:Toggle("เส้นชี้เป้า", "แสดงเส้นจากกลางจอไปหาศัตรู", false, function(state)
+        Config.ShowTracer = state
+    end, "ShowTracer")
+
+    -- ========================================================
+    -- 4) เลือกโหมดการกด (ใช้ทั้ง PC และมือถือ)
+    -- ========================================================
+    AimGroupL:Dropdown("Keybind Mode", {"Toggle", "Hold"}, "Toggle", function(value)
+        -- ใช้ find แทนการเทียบตรง เผื่อ UI แปลข้อความ/มีวงเล็บต่อท้าย
+        local newMode = string.find(tostring(value), "Hold", 1, true) and "Hold" or "Toggle"
+        if newMode ~= State.Mode then
+            State.Mode = newMode
+            State.HoldInput = nil
+            SetCameraLock(false) -- เปลี่ยนโหมดแล้วปิดก่อน กันสถานะค้าง
+        end
+    end, "CameraLockMode")
+
+    -- ========================================================
+    -- 5) ระบบคีย์ลัด (เฉพาะ PC)
+    -- ========================================================
+    if IsPC then
+        -- เช็คว่า input ที่เข้ามาตรงกับปุ่มที่ตั้งไว้หรือไม่
+        local function MatchesBind(input)
+            if State.BindKind == "KeyCode" then
+                return input.UserInputType == Enum.UserInputType.Keyboard
+                    and input.KeyCode == State.BindValue
             end
-            return
+            return input.UserInputType == State.BindValue
         end
-        
-        if input.KeyCode == KeybindConfig.BoundKey or input.UserInputType.Name == KeybindConfig.BoundKey then
-            if KeybindConfig.Mode == "Toggle" then
-                UpdateCameraLockState(not CameraLockConfig.Enabled)
-            elseif KeybindConfig.Mode == "Hold" then
-                UpdateCameraLockState(true)
+
+        -- ปุ่มกดเพื่อเริ่มรอรับปุ่มใหม่
+        AimGroupL:Button("Change Keybind", "กดแล้วกดปุ่มคีย์บอร์ด/เมาส์ที่ต้องการ (ปุ่มเริ่มต้น: E)", function()
+            State.Binding = true
+            local token = {}
+            State.BindToken = token
+            Notify("กรุณากดปุ่มที่ต้องการบันทึก...", "Info")
+
+            -- ยกเลิกอัตโนมัติใน 8 วินาที ถ้าไม่ได้กดอะไร
+            task.delay(8, function()
+                if State.Binding and State.BindToken == token then
+                    State.Binding = false
+                    Notify("ยกเลิกการตั้งปุ่มลัด (หมดเวลา)", "Info")
+                end
+            end)
+        end, "CameraLockBindPC")
+
+        -- ดักจับตอน "กดปุ่ม"
+        UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+
+            -- (ก) โหมดรอรับปุ่มใหม่
+            if State.Binding then
+                local t = input.UserInputType
+                local label
+
+                if t == Enum.UserInputType.Keyboard and input.KeyCode ~= Enum.KeyCode.Unknown then
+                    State.BindKind = "KeyCode"
+                    State.BindValue = input.KeyCode
+                    label = input.KeyCode.Name
+                elseif t == Enum.UserInputType.MouseButton1
+                    or t == Enum.UserInputType.MouseButton2
+                    or t == Enum.UserInputType.MouseButton3 then
+                    State.BindKind = "UserInputType"
+                    State.BindValue = t
+                    label = t.Name
+                else
+                    return -- input ชนิดอื่น (เช่น ล้อเมาส์) ไม่รับ รอต่อ
+                end
+
+                State.Binding = false
+                State.BindToken = nil
+                Notify("บันทึกปุ่มลัด: " .. label, "Success")
+                return -- ไม่ให้ปุ่มที่เพิ่งตั้งไปสั่งเปิดล็อกทันที
             end
+
+            -- (ข) ตรวจจับปุ่มลัดที่ตั้งไว้
+            if MatchesBind(input) then
+                if State.Mode == "Hold" then
+                    SetCameraLock(true)
+                else
+                    SetCameraLock(not CameraLockConfig.Enabled)
+                end
+            end
+        end)
+
+        -- ดักจับตอน "ปล่อยปุ่ม" (ใช้กับโหมด Hold)
+        -- ไม่เช็ค gameProcessed ที่นี่ เพื่อไม่ให้ล็อกค้างถ้าปล่อยปุ่มบน UI
+        UserInputService.InputEnded:Connect(function(input)
+            if State.Mode == "Hold" and not State.Binding and MatchesBind(input) then
+                SetCameraLock(false)
+            end
+        end)
+    end
+
+    -- ========================================================
+    -- 6) ปุ่มลอยบนหน้าจอ (เฉพาะมือถือ)
+    -- ========================================================
+    if IsMobile then
+        -- ถ้ารันสคริปต์ซ้ำ ให้ลบปุ่มเก่าทิ้งก่อน กันปุ่มซ้อน
+        local env = (getgenv and getgenv()) or _G
+        if env.__CameraLockMobileGui then
+            pcall(function() env.__CameraLockMobileGui:Destroy() end)
         end
-    end)
 
-    UserInputService.InputEnded:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        if KeybindConfig.Mode == "Hold" and (input.KeyCode == KeybindConfig.BoundKey or input.UserInputType.Name == KeybindConfig.BoundKey) then
-            UpdateCameraLockState(false)
-        end
-    end)
-end
+        -- ScreenGui ของตัวเอง (ไม่พึ่ง OverlayGui เพราะถูกสร้างทีหลังบรรทัดนี้)
+        local MobileGui = Instance.new("ScreenGui")
+        MobileGui.Name = "CameraLockMobileGui"
+        MobileGui.ResetOnSpawn = false
+        MobileGui.IgnoreGuiInset = true
+        ProtectParent(MobileGui)
+        env.__CameraLockMobileGui = MobileGui
 
--- -------------------------------------------
--- [ส่วนของมือถือ] จะแสดงเฉพาะเมื่อใช้มือถือ
--- -------------------------------------------
-if IsMobile then
-    KeybindGroup:Dropdown("โหมดการกด (มือถือ)", {"Toggle (กดติด-ดับ)", "Hold (กดค้าง)"}, "Toggle (กดติด-ดับ)", function(value)
-        KeybindConfig.Mode = (value == "Toggle (กดติด-ดับ)") and "Toggle" or "Hold"
-    end, "CameraLockModeMobile")
-
-    KeybindGroup:Label("ใช้ปุ่ม 'AIM' ที่ลอยอยู่มุมซ้ายหน้าจอ", "คำแนะนำ")
-
-    -- สร้างปุ่มลอยสำหรับมือถือ
-    local function CreateMobileButton()
         local btn = Instance.new("TextButton")
-        btn.Name = "CipherTouchBtn"
+        btn.Name = "CameraLockTouchBtn"
         btn.Size = UDim2.new(0, 60, 0, 60)
         btn.Position = UDim2.new(0, 20, 0.5, -30)
-        btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-        btn.BackgroundTransparency = 0.3
-        btn.TextColor3 = Color3.fromRGB(0, 220, 255)
+        btn.BackgroundColor3 = COLOR_OFF
+        btn.BackgroundTransparency = 0.2
+        btn.TextColor3 = COLOR_ON
         btn.Font = Enum.Font.GothamBold
         btn.Text = "AIM"
         btn.TextSize = 14
         btn.BorderSizePixel = 0
-        btn.Parent = OverlayGui
-        
-        local corner = Instance.new("UICorner", btn)
-        corner.CornerRadius = UDim.new(0, 10)
-        
+        btn.AutoButtonColor = false -- ปิดการเปลี่ยนสีอัตโนมัติ เพื่อคุมสีเองตามสถานะ
+        btn.Parent = MobileGui
+
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+
         local stroke = Instance.new("UIStroke", btn)
-        stroke.Color = Color3.fromRGB(0, 220, 255)
+        stroke.Color = COLOR_ON
         stroke.Thickness = 1.5
-        
-        local isHolding = false
-        
-        btn.MouseButton1Down:Connect(function()
-            if KeybindConfig.Mode == "Hold" then
-                UpdateCameraLockState(true)
-                btn.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
-                isHolding = true
-            elseif KeybindConfig.Mode == "Toggle" then
-                UpdateCameraLockState(not CameraLockConfig.Enabled)
+
+        MobileButton = btn
+        RefreshMobileButton()
+
+        -- แตะปุ่ม: Toggle = สลับเปิด/ปิด , Hold = เปิดระหว่างที่นิ้วแตะค้าง
+        btn.InputBegan:Connect(function(input)
+            local t = input.UserInputType
+            if t ~= Enum.UserInputType.Touch and t ~= Enum.UserInputType.MouseButton1 then return end
+
+            if State.Mode == "Hold" then
+                State.HoldInput = input
+                SetCameraLock(true)
+            else
+                SetCameraLock(not CameraLockConfig.Enabled)
             end
         end)
-        
-        btn.MouseButton1Up:Connect(function()
-            if KeybindConfig.Mode == "Hold" and isHolding then
-                UpdateCameraLockState(false)
-                btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-                isHolding = false
-            end
-        end)
-        
-        RunService.RenderStepped:Connect(function()
-            if KeybindConfig.Mode == "Toggle" then
-                if CameraLockConfig.Enabled then
-                    btn.BackgroundColor3 = Color3.fromRGB(0, 150, 200)
-                else
-                    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-                end
+
+        -- ปล่อยนิ้ว (ฟังที่ UserInputService เพื่อให้ปล่อยนอกปุ่มก็ยังปิดได้ ไม่ค้าง)
+        UserInputService.InputEnded:Connect(function(input)
+            local held = State.HoldInput
+            if not held then return end
+
+            if input == held
+                or (held.UserInputType == Enum.UserInputType.MouseButton1
+                    and input.UserInputType == Enum.UserInputType.MouseButton1) then
+                State.HoldInput = nil
+                SetCameraLock(false)
             end
         end)
     end
-    
-    CreateMobileButton()
 end
-
-local VisualGroupL = VisualTab:Group("ESP Settings", "Left")
-local VisualGroupR = VisualTab:Group("ESP Extra", "Right")
-local VisualGroupInv = VisualTab:Group("Inventory", "Left")
-
 Tg.Names = VisualGroupL:Toggle("ชื่อ", nil, false, function(state)
     S.esp_names = state
     refreshESPTheme()
@@ -3471,7 +3574,7 @@ Safe("FarmTab", function()
     end
 
     local function syncFarmSettings()
-        local mode = selectedFarmJob
+        BindToggle(KeyGroupAim, "Camera Lock", Tg.CameraLock, "CameraLock")
         for _, control in ipairs(farmSettingControls.construction) do
             setControlVisible(control, mode == "งานก่อสร้าง")
         end
@@ -4729,137 +4832,4 @@ Safe("PoliceEscapeTab", function()
     -- end)
 end)
 
--- ===== ระบบดักจับปุ่มกด (สำหรับ PC) =====
-if IsPC then
-    UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        
-        -- 1. โหมดรอรับการบันทึกปุ่ม
-        if KeybindConfig.IsBinding then
-            if input.UserInputType == Enum.UserInputType.Keyboard then
-                KeybindConfig.BoundKey = input.KeyCode
-                KeybindConfig.IsBinding = false
-                Win:Notify({Title = "CipherHUB", Content = "บันทึกปุ่ม: " .. input.KeyCode.Name, Duration = 2, Type = "Success"})
-            elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.MouseButton2 then
-                KeybindConfig.BoundKey = input.UserInputType.Name
-                KeybindConfig.IsBinding = false
-                Win:Notify({Title = "CipherHUB", Content = "บันทึกปุ่ม: " .. input.UserInputType.Name, Duration = 2, Type = "Success"})
-            end
-            return
-        end
-        
-        -- 2. ตรวจจับการกดปุ่มที่ตั้งไว้
-        if input.KeyCode == KeybindConfig.BoundKey or input.UserInputType.Name == KeybindConfig.BoundKey then
-            if KeybindConfig.Mode == "Toggle" then
-                UpdateCameraLockState(not KeybindConfig.IsActive)
-            elseif KeybindConfig.Mode == "Hold" then
-                UpdateCameraLockState(true)
-            end
-        end
-    end)
 
-    -- ดักจับการปล่อยปุ่ม (สำหรับโหมด Hold)
-    UserInputService.InputEnded:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        if KeybindConfig.Mode == "Hold" and (input.KeyCode == KeybindConfig.BoundKey or input.UserInputType.Name == KeybindConfig.BoundKey) then
-            UpdateCameraLockState(false)
-        end
-    end)
-end
-
--- ===== ระบบปุ่มลอยสำหรับมือถือ (Touch) =====
-if IsMobile then
-    local function CreateMobileButton()
-        if KeybindConfig.TouchButton then
-            KeybindConfig.TouchButton:Destroy()
-        end
-        
-        local btn = Instance.new("TextButton")
-        btn.Name = "CipherTouchBtn"
-        btn.Size = UDim2.new(0, 60, 0, 60)
-        btn.Position = UDim2.new(0, 20, 0.5, -30)
-        btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-        btn.BackgroundTransparency = 0.3
-        btn.TextColor3 = Color3.fromRGB(0, 220, 255)
-        btn.Font = Enum.Font.GothamBold
-        btn.Text = "AIM"
-        btn.TextSize = 14
-        btn.BorderSizePixel = 0
-        btn.Parent = OverlayGui
-        
-        local corner = Instance.new("UICorner", btn)
-        corner.CornerRadius = UDim.new(0, 10)
-        
-        local stroke = Instance.new("UIStroke", btn)
-        stroke.Color = Color3.fromRGB(0, 220, 255)
-        stroke.Thickness = 1.5
-        
-        local isHolding = false
-        
-        btn.MouseButton1Down:Connect(function()
-            if KeybindConfig.Mode == "Hold" then
-                UpdateCameraLockState(true)
-                btn.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
-                isHolding = true
-            elseif KeybindConfig.Mode == "Toggle" then
-                UpdateCameraLockState(not KeybindConfig.IsActive)
-            end
-        end)
-        
-        btn.MouseButton1Up:Connect(function()
-            if KeybindConfig.Mode == "Hold" and isHolding then
-                UpdateCameraLockState(false)
-                btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-                isHolding = false
-            end
-        end)
-        
-        RunService.RenderStepped:Connect(function()
-            if KeybindConfig.Mode == "Toggle" then
-                if KeybindConfig.IsActive then
-                    btn.BackgroundColor3 = Color3.fromRGB(0, 150, 200)
-                else
-                    btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-                end
-            end
-        end)
-        
-        KeybindConfig.TouchButton = btn
-    end
-    
-    CreateMobileButton()
-end
-
--- สมมติว่าคุณมี KeyGroupAim
-local KeyGroupAim = KeyTab:Group("Camera Lock", "Left")
-
--- -------------------------------------------
--- [ส่วนของ PC] จะแสดงเฉพาะเมื่อใช้คอมพิวเตอร์
--- -------------------------------------------
-if IsPC then
-    KeyGroupAim:Dropdown("โหมดการกด (PC)", {"Toggle (กดติด-ดับ)", "Hold (กดค้าง)"}, "Toggle (กดติด-ดับ)", function(value)
-        KeybindConfig.Mode = (value == "Toggle (กดติด-ดับ)") and "Toggle" or "Hold"
-    end, "CameraLockModePC")
-
-    KeyGroupAim:Button("เปลี่ยนปุ่มลัด (PC)", "กดเพื่อเปลี่ยนปุ่มลัดปัจจุบัน", function()
-        KeybindConfig.IsBinding = true
-        Win:Notify({Title = "CipherHUB", Content = "กรุณากดปุ่มที่ต้องการบันทึก...", Duration = 3, Type = "Info"})
-    end, "CameraLockBindPC")
-end
-
--- -------------------------------------------
--- [ส่วนของมือถือ] จะแสดงเฉพาะเมื่อใช้มือถือ
--- -------------------------------------------
-if IsMobile then
-    KeyGroupAim:Dropdown("โหมดการกด (มือถือ)", {"Toggle (กดติด-ดับ)", "Hold (กดค้าง)"}, "Toggle (กดติด-ดับ)", function(value)
-        KeybindConfig.Mode = (value == "Toggle (กดติด-ดับ)") and "Toggle" or "Hold"
-    end, "CameraLockModeMobile")
-
-    -- ไม่ต้องมีปุ่มเปลี่ยนคีย์บอร์ด เพราะมือถือใช้ปุ่มลอยที่สร้างขึ้นมาแทน
-    KeyGroupAim:Label("ใช้ปุ่ม 'AIM' ที่ลอยอยู่มุมซ้ายหน้าจอ", "คำแนะนำ")
-end
-
--- -------------------------------------------
--- [ทั้ง 2 อุปกรณ์] ตัวเลือกอื่นๆ ที่ใช้ร่วมกัน
--- -------------------------------------------
--- (ถ้ามีตัวเลือก FOV, Smoothness ให้ใส่ไว้ข้างล่างนี้ได้เลย)
