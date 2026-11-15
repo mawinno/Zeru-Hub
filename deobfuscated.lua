@@ -305,30 +305,7 @@ oldIndex = hookmetamethod(game, "__index", function(self, key)
     return oldIndex(self, key)
 end)
 
--- ===== Hook UserInputService.GetMouseLocation (เวอร์ชันแก้ Error) =====
--- ใช้ hookmetamethod เพื่อดักจับการเรียกฟังก์ชัน แทนการเขียนทับตรงๆ
-local oldNamecall
-oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-    local method = getnamecallmethod()
-    
-    -- ดักจับเมื่อเกมเรียกใช้ฟังก์ชัน GetMouseLocation ของ UserInputService
-    if MouseAimConfig.Enabled and rawequal(self, UserInputService) and (method == "GetMouseLocation") then
-        local shouldLock = math.random(1, 100) <= MouseAimConfig.HitChance
-        if shouldLock then
-            local target = GetClosestTarget()
-            if target then
-                local targetPos = GetSmoothedTargetPosition(target)
-                if targetPos and Camera then
-                    local screenPos = Camera:WorldToViewportPoint(targetPos)
-                    -- คืนค่าพิกัดเมาส์ที่ปลอมเป็นตำแหน่งศัตรู
-                    return Vector2.new(screenPos.X, screenPos.Y)
-                end
-            end
-        end
-    end
-    
-    return oldNamecall(self, ...)
-end)
+
 
 -- อัปเดตฟังก์ชัน GetTarget และ GetAimCenter เดิมให้ทำงานกับระบบใหม่
 GetTarget = function()
