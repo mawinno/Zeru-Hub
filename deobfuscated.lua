@@ -3394,8 +3394,19 @@ do
             end
         end)
     end
-end
-Tg.Names = VisualGroupL:Toggle("ชื่อ", nil, false, function(state)
+    end          -- บรรทัด 3396 (ปิด if IsMobile)
+end              -- บรรทัด 3397 (ปิด do ของ Camera Lock)
+
+-- ===== แท็บ Visual (ESP + Inventory) =====   <-- วางเริ่มตรงนี้
+local VisualTab = Win:Tab({
+    ...
+})
+
+local VisualGroupL = VisualTab:Group("ESP Settings", "Left")
+local VisualGroupR = VisualTab:Group("ESP Extra", "Right")
+local VisualGroupInv = VisualTab:Group("Inventory", "Left")   <-- ถึงตรงนี้
+
+Tg.Names = VisualGroupL:Toggle("ชื่อ", ...   -- เดิมคือบรรทัด 3398
     S.esp_names = state
     refreshESPTheme()
 end, "ESPNames")
