@@ -270,90 +270,87 @@ local function GetSmoothedTargetPosition(targetPart)
     return smoothed
 end
 
--- ===== ระบบ Bypass: สร้าง Mouse ปลอม (ไม่ใช้ hookmetamethod) =====
-local MouseSpoofer = {}
-
--- ฟังก์ชันคำนวณตำแหน่งเมาส์ปลอม
-function MouseSpoofer:Update()
-    if not MouseAimConfig.Enabled then
-        MouseSpoofer.Enabled = false
-        return
-    end
-
-    local shouldLock = math.random(1, 100) <= MouseAimConfig.HitChance
-    if not shouldLock then
-        MouseSpoofer.Enabled = false
-        return
-    end
-
-    local target = GetClosestTarget()
-    if target then
-        local targetPos = GetSmoothedTargetPosition(target)
-        if targetPos then
-            MouseSpoofer.Enabled = true
-            MouseSpoofer.Position = targetPos
-            MouseSpoofer.TargetPart = target
-            MouseSpoofer.ScreenPos = Camera:WorldToViewportPoint(targetPos)
-        end
-    else
-        MouseSpoofer.Enabled = false
-    end
-end
-
--- สร้าง Mouse ปลอม
-local fakeMouse = {
-    Hit = CFrame.new(),
-    Target = nil,
-    UnitRay = Ray.new(Vector3.zero, Vector3.zero),
-    Origin = Vector3.zero,
-    X = 0,
-    Y = 0,
-    ViewSizeX = 0,
-    ViewSizeY = 0,
+-- ============================================================
+-- CAMERA LOCK SYSTEM (Bypass 100% - ไม่ใช้ Hook Metatable)
+-- ============================================================
+local CameraLockConfig = {
+    Enabled = false,
+    TargetPart = "Head",
+    FOV = 180,
+    MaxDistance = 800,
+    TeamCheck = false,
+    WallCheck = false,
+    Smoothness = 0.25, -- ยิ่งค่าน้อย กล้องจะหมุนตามเป้าเร็วขึ้น (0.1 = เร็วมาก, 0.5 = ช้า)
 }
 
--- ใช้ Metatable ในการดักจับการอ่านค่าจาก Mouse ปลอม (ไม่แตะ Game Metatable)
-setmetatable(fakeMouse, {
-    __index = function(t, k)
-        if MouseSpoofer.Enabled then
-            if k == "Hit" then
-                return CFrame.new(MouseSpoofer.Position)
-            elseif k == "Target" then
-                return MouseSpoofer.TargetPart
-            elseif k == "UnitRay" then
-                local origin = Camera.CFrame.Position
-                local direction = (MouseSpoofer.Position - origin).Unit
-                return Ray.new(origin, direction)
-            elseif k == "Origin" then
-                return Camera.CFrame.Position
-            elseif k == "X" then
-                return MouseSpoofer.ScreenPos.X
-            elseif k == "Y" then
-                return MouseSpoofer.ScreenPos.Y
+-- ฟังก์ชันหาเป้าหมาย (ใช้ของเดิมคุณได้เลย)
+local function GetClosestTarget()
+    if not CameraLockConfig.Enabled then return nil end
+    
+    Camera = Workspace.CurrentCamera or Camera
+    if not Camera then return nil end
+    
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+    
+    local center = Camera.ViewportSize / 2
+    local bestTarget, bestDistance = nil, math.huge
+    
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= LocalPlayer and not IsSkipped(other) then
+            local char = other.Character
+            local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local part = char and (char:FindFirstChild(CameraLockConfig.TargetPart) or char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+            
+            local sameTeam = CameraLockConfig.TeamCheck and LocalPlayer.Team and other.Team == LocalPlayer.Team and not LocalPlayer.Neutral and not other.Neutral
+            
+            if humanoid and humanoid.Health > 0 and root and part and not sameTeam then
+                if (root.Position - myRoot.Position).Magnitude <= CameraLockConfig.MaxDistance then
+                    local point, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen and point.Z > 0 then
+                        local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
+                        if distance <= CameraLockConfig.FOV and distance < bestDistance then
+                            local blocked = CameraLockConfig.WallCheck and IsWallBlocked(Camera.CFrame.Position, part.Position, char)
+                            if not blocked then
+                                bestTarget = part
+                                bestDistance = distance
+                            end
+                        end
+                    end
+                end
             end
         end
-        return t[k] or Mouse[k] -- ถ้าไม่ได้เปิดระบบ ให้คืนค่าเมาส์จริง
-    end,
-})
+    end
+    return bestTarget
+end
 
--- อัปเดตตำแหน่ง Mouse ปลอมทุกเฟรม
+-- อัปเดตกล้องทุกเฟรม (นี่คือหัวใจของ Camera Lock)
 RunService.RenderStepped:Connect(function()
-    MouseSpoofer:Update()
+    if not CameraLockConfig.Enabled then return end
+    
+    local targetPart = GetClosestTarget()
+    if targetPart then
+        -- คำนวณทิศทางจากกล้องไปยังเป้าหมาย
+        local targetPos = targetPart.Position
+        local cameraPos = Camera.CFrame.Position
+        
+        -- ใช้ CFrame.lookAt เพื่อสร้างการหมุนกล้องที่平滑 (Smooth)
+        local goalCFrame = CFrame.lookAt(cameraPos, targetPos)
+        
+        -- Lerp กล้องเพื่อไม่ให้กระตุก (ใช้ค่า Smoothness)
+        Camera.CFrame = Camera.CFrame:Lerp(goalCFrame, CameraLockConfig.Smoothness)
+    end
 end)
 
-
-
--- อัปเดตฟังก์ชัน GetTarget และ GetAimCenter เดิมให้ทำงานกับระบบใหม่
+-- อัปเดตฟังก์ชัน GetTarget และ GetAimCenter เดิม
 GetTarget = function()
     return GetClosestTarget()
 end
 
 GetAimCenter = function()
     Camera = Workspace.CurrentCamera or Camera
-    if MouseAimConfig.Center == "เมาส์" and not UserInputService.TouchEnabled then
-        -- ใช้ Mouse.X/Y แทน เพราะ Executor บล็อก GetMouseLocation
-        return Vector2.new(Mouse.X, Mouse.Y)
-    end
     return Camera and Camera.ViewportSize / 2 or Vector2.zero
 end
 
@@ -3087,45 +3084,37 @@ local AimTab = Win:Tab({
 local AimGroupL = AimTab:Group("Aim Settings", "Left")
 local AimGroupR = AimTab:Group("Aim Extra", "Right")
 
--- ===== MOUSE AIMLOCK UI =====
-Tg.MouseAimlock = AimGroupL:Toggle("Mouse Aimlock", "เปิด/ปิดการล็อกเมาส์อัตโนมัติ", false, function(state)
-    MouseAimConfig.Enabled = state
-    if not state then
-        lastTargetPos = nil
-    end
-end, "MouseAimlock")
+-- ===== CAMERA LOCK UI =====
+Tg.CameraLock = AimGroupL:Toggle("Camera Lock", "ล็อกกล้องไปที่ศัตรู (บายพาส 100%)", false, function(state)
+    CameraLockConfig.Enabled = state
+end, "CameraLock")
+
+AimGroupL:Slider("ความเร็วล็อกกล้อง", 1, 100, 25, "%", function(value)
+    CameraLockConfig.Smoothness = value / 100
+end, 1, "CameraSmoothness")
 
 AimGroupL:Slider("FOV", 60, 400, 180, "px", function(value)
-    MouseAimConfig.FOV = value
+    CameraLockConfig.FOV = value
 end, 1, "FOV")
 
 AimGroupL:Slider("ระยะสูงสุด", 50, 2000, 800, "studs", function(value)
-    MouseAimConfig.MaxDistance = value
+    CameraLockConfig.MaxDistance = value
 end, 50, "MaxDistance")
 
 AimGroupL:Dropdown("ตำแหน่งยิง", {
     "Head",
-    "HumanoidRootPart",
-    "สุ่มหัว / ลำตัว"
+    "HumanoidRootPart"
 }, "Head", function(value)
-    MouseAimConfig.TargetPart = value
+    CameraLockConfig.TargetPart = value
 end, "AimPart")
 
-AimGroupL:Slider("โอกาสเปลี่ยนทิศกระสุน", 0, 100, 100, "%", function(value)
-    MouseAimConfig.HitChance = value
-end, 1, "HitChance")
-
-AimGroupL:Dropdown("จุดศูนย์กลาง FOV", {"กลางจอ", "เมาส์"}, "กลางจอ", function(value)
-    MouseAimConfig.Center = value
-end, "AimCenter")
-
-AimGroupR:Toggle("เช็คกำแพง", "ใช้กับ Mouse Aimlock และกระเป๋า", false, function(state)
-    MouseAimConfig.WallCheck = state
+AimGroupR:Toggle("เช็คกำแพง", "ใช้กับ Camera Lock และกระเป๋า", false, function(state)
+    CameraLockConfig.WallCheck = state
     Config.WallCheck = state
 end, "WallCheck")
 
-AimGroupR:Toggle("เช็คทีม", "ใช้กับ Mouse Aimlock, ESP และกระเป๋า", false, function(state)
-    MouseAimConfig.TeamCheck = state
+AimGroupR:Toggle("เช็คทีม", "ใช้กับ Camera Lock, ESP และกระเป๋า", false, function(state)
+    CameraLockConfig.TeamCheck = state
     Config.TeamCheck = state
 end, "TeamCheck")
 
@@ -3136,15 +3125,6 @@ end, "ShowFOV")
 Tg.TargetLine = AimGroupR:Toggle("เส้นชี้เป้า", "แสดงเส้นจากกลางจอไปหาศัตรู", false, function(state)
     Config.ShowTracer = state
 end, "ShowTracer")
-
-Tg.ShowFOV = AimGroupR:Toggle("แสดง FOV", "แสดงวงกลม FOV บนหน้าจอ", false, function(state)
-    Config.ShowFOV = state
-end, "ShowFOV")
-
-Tg.TargetLine = AimGroupR:Toggle("เส้นชี้เป้า", "แสดงเส้นจากกลางจอไปหาศัตรู", false, function(state)
-    Config.ShowTracer = state
-end, "ShowTracer")
-
 AimGroupR:Button("รีฮุกระบบยิง", "ค้นหา ProjectileHandler และติดตั้ง Hook ใหม่", function()
     Hooked = false
     hookStatus = "กำลังค้นหา Hook..."
